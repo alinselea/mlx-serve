@@ -39,6 +39,46 @@ from kev.mlx_model import merge_lora
 from kev.model import SPECIAL, load_tokenizer
 
 
+README = """---
+license: apache-2.0
+base_model: jaredpalmer/kev-4b
+base_model_relation: quantized
+library_name: mlx-serve
+tags:
+  - mlx
+  - mlx-serve
+  - kev
+  - decisions
+  - qwen3_5
+pipeline_tag: text-classification
+---
+
+# Kev-4B for mlx-serve
+
+[Kev-4B](https://huggingface.co/jaredpalmer/kev-4b) (a LoRA on
+[Qwen3.5-4B-Base](https://huggingface.co/Qwen/Qwen3.5-4B-Base) with a pointer head) packed for
+[mlx-serve](https://github.com/ddalcu/mlx-serve)'s `POST /v1/decisions`.
+
+Kev answers typed questions about a piece of text (`choice`, `noul`, `score`) with calibrated
+probabilities. It never generates text.
+
+The pack folds the LoRA into the base the way kev does on MLX, quantizes the trunk to 8-bit
+(affine, group 64; a bf16 build comes from `--q-bits 0`), and stores the pointer head as
+`kev_head.safetensors` with the calibration temperature in `kev_config.json`. No PyTorch or pickle
+file is needed to serve it.
+
+```sh
+curl -s localhost:11234/v1/decisions -H 'content-type: application/json' -d '{
+  "model": "<this model id>",
+  "state": {"subject": "Charged twice", "body": "Please refund the duplicate today."},
+  "questions": {"refund": {"type": "noul", "instructions": "Does the customer ask for money back?"}}
+}'
+```
+
+Built with `tests/convert_kev_weights.py` from the mlx-serve repo. Kev and Qwen3.5 are Apache-2.0.
+"""
+
+
 def read_head(run_dir):
     """head.pt, loaded safely: the pointer-head state dict plus the metadata the pack keeps."""
     meta = torch.load(Path(run_dir) / "head.pt", map_location="cpu", weights_only=True)
@@ -96,6 +136,7 @@ def main():
     # such as <think> that the raw tokenizer.json lacks). Saved from that object, never copied from a run.
     load_tokenizer(meta["base"], revision=meta.get("base_revision")).save_pretrained(str(out))
     mx.save_safetensors(str(out / "kev_head.safetensors"), {k: mx.array(v.numpy()) for k, v in head.items()})
+    (out / "README.md").write_text(README, encoding="utf-8")
     with open(out / "kev_config.json", "w") as f:
         json.dump({"format": "kev", "format_version": 1, "head_dim": head_dim, "temperature": temperature,
                    "delimiters": {"state": SPECIAL[0], "question": SPECIAL[1], "option": SPECIAL[2],
