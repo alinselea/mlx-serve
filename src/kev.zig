@@ -741,35 +741,6 @@ fn parseKevConfig(v: std.json.Value) !KevConfig {
     return .{ .head_dim = @intCast(hd.integer), .logit_scale = scale };
 }
 
-/// Every `config.json` field the shared model parser reads without checking its JSON type, with the type it
-/// assumes. Checked here first so a malformed pack is a named load error, never an unchecked union access.
-const TypedKey = struct { key: []const u8, t: std.meta.Tag(std.json.Value) };
-const UNCHECKED_CONFIG_KEYS = [_]TypedKey{
-    .{ .key = "bits", .t = .integer },                    .{ .key = "bos_token_id", .t = .integer },
-    .{ .key = "eoa_token_id", .t = .integer },            .{ .key = "full_attention_interval", .t = .integer },
-    .{ .key = "gate_activation", .t = .string },          .{ .key = "gating", .t = .string },
-    .{ .key = "group_size", .t = .integer },              .{ .key = "head_dim", .t = .integer },
-    .{ .key = "hidden_size", .t = .integer },             .{ .key = "image_token_index", .t = .integer },
-    .{ .key = "intermediate_size", .t = .integer },       .{ .key = "layernorm_num_groups", .t = .integer },
-    .{ .key = "layers_block_type", .t = .array },         .{ .key = "linear_conv_kernel_dim", .t = .integer },
-    .{ .key = "linear_key_head_dim", .t = .integer },     .{ .key = "linear_num_key_heads", .t = .integer },
-    .{ .key = "linear_num_value_heads", .t = .integer },  .{ .key = "linear_silu", .t = .bool },
-    .{ .key = "linear_value_head_dim", .t = .integer },   .{ .key = "max_position_embeddings", .t = .integer },
-    .{ .key = "model_type", .t = .string },               .{ .key = "n_shared_experts", .t = .integer },
-    .{ .key = "no_kda_lora", .t = .bool },                .{ .key = "num_attention_heads", .t = .integer },
-    .{ .key = "num_hidden_layers", .t = .integer },       .{ .key = "num_key_value_heads", .t = .integer },
-    .{ .key = "num_kv_heads_for_linear_attn", .t = .integer }, .{ .key = "qk_head_dim", .t = .integer },
-    .{ .key = "quantization", .t = .object },             .{ .key = "query_pre_attn_scalar", .t = .integer },
-    .{ .key = "rope_type", .t = .string },                .{ .key = "score_function", .t = .string },
-    .{ .key = "scoring_func", .t = .string },             .{ .key = "sliding_window_pattern", .t = .integer },
-    .{ .key = "swa_head_dim", .t = .integer },            .{ .key = "swa_num_attention_heads", .t = .integer },
-    .{ .key = "swa_num_key_value_heads", .t = .integer }, .{ .key = "text_config", .t = .object },
-    .{ .key = "topk_method", .t = .string },              .{ .key = "use_bidirectional_attention", .t = .bool },
-    .{ .key = "use_kda_lora", .t = .bool },               .{ .key = "use_mla_nope", .t = .bool },
-    .{ .key = "use_sconv", .t = .bool },                  .{ .key = "vision_config", .t = .object },
-    .{ .key = "vocab_size", .t = .integer },
-};
-
 fn checkBaseConfig(io: std.Io, a: std.mem.Allocator, dir: []const u8) !void {
     const path = try std.fmt.allocPrint(a, "{s}/config.json", .{dir});
     defer a.free(path);
@@ -784,31 +755,18 @@ fn checkBaseConfig(io: std.Io, a: std.mem.Allocator, dir: []const u8) !void {
     return checkBaseConfigValue(parsed.value);
 }
 
-/// The Qwen3.5 base config a Kev pack carries: object shapes, the types the model parser assumes, and positive,
-/// bounded geometry.
+/// The Qwen3.5 base config a Kev pack carries: a JSON object of that family, with integer core geometry. The rest
+/// is left to the shared model parser, as for every model; the parsed geometry is then checked by `checkGeometry`.
 fn checkBaseConfigValue(root: std.json.Value) !void {
     if (root != .object) return error.KevBadBaseConfig;
     const mt = root.object.get("model_type") orelse return error.KevBadBaseConfig;
     if (mt != .string or !(std.mem.eql(u8, mt.string, "qwen3_5") or std.mem.eql(u8, mt.string, "qwen3_5_moe")))
         return error.KevUnsupportedBase;
     const text = if (root.object.get("text_config")) |tc| tc else root;
-    for ([_]std.json.Value{ root, text }) |o| {
-        if (o != .object) return error.KevBadBaseConfig;
-        for (UNCHECKED_CONFIG_KEYS) |k| if (o.object.get(k.key)) |v| {
-            if (std.meta.activeTag(v) != k.t) return error.KevBadBaseConfig;
-            if (v == .integer and (v.integer < 0 or v.integer > std.math.maxInt(i32))) return error.KevBadBaseConfig;
-        };
-        if (o.object.get("quantization")) |q| for ([_][]const u8{ "bits", "group_size" }) |key| if (q.object.get(key)) |v| {
-            if (v != .integer or v.integer <= 0 or v.integer > 1024) return error.KevBadBaseConfig;
-        };
-    }
-    const geometry = [_]struct { key: []const u8, max: i64 }{
-        .{ .key = "hidden_size", .max = 65536 },   .{ .key = "num_hidden_layers", .max = 1024 },
-        .{ .key = "num_attention_heads", .max = 1024 }, .{ .key = "vocab_size", .max = 1 << 24 },
-    };
-    for (geometry) |g| {
-        const v = text.object.get(g.key) orelse return error.KevBadBaseConfig;
-        if (v.integer <= 0 or v.integer > g.max) return error.KevBadBaseConfig;
+    if (text != .object) return error.KevBadBaseConfig;
+    for ([_][]const u8{ "hidden_size", "num_hidden_layers", "num_attention_heads", "vocab_size" }) |key| {
+        const v = text.object.get(key) orelse return error.KevBadBaseConfig;
+        if (v != .integer or v.integer <= 0 or v.integer > std.math.maxInt(u32)) return error.KevBadBaseConfig;
     }
 }
 
@@ -1419,7 +1377,6 @@ test "kev: a pack's base config is checked before the shared parser reads it" {
         .{ .json = "{\"model_type\": \"qwen3_5\", \"text_config\": {\"hidden_size\": \"2560\", \"num_hidden_layers\": 32, \"num_attention_heads\": 16, \"vocab_size\": 1}}", .err = error.KevBadBaseConfig },
         .{ .json = "{\"model_type\": \"qwen3_5\", \"text_config\": {\"hidden_size\": 0, \"num_hidden_layers\": 32, \"num_attention_heads\": 16, \"vocab_size\": 1}}", .err = error.KevBadBaseConfig },
         .{ .json = "{\"model_type\": \"qwen3_5\", \"text_config\": {\"hidden_size\": -5, \"num_hidden_layers\": 32, \"num_attention_heads\": 16, \"vocab_size\": 1}}", .err = error.KevBadBaseConfig },
-        .{ .json = "{\"model_type\": \"qwen3_5\", \"quantization\": {\"bits\": \"8\"}, \"text_config\": {\"hidden_size\": 1, \"num_hidden_layers\": 1, \"num_attention_heads\": 1, \"vocab_size\": 1}}", .err = error.KevBadBaseConfig },
         .{ .json = "{\"model_type\": \"qwen3_5\", \"text_config\": {\"hidden_size\": 2560, \"num_hidden_layers\": 32, \"num_attention_heads\": 16}}", .err = error.KevBadBaseConfig },
     };
     {
