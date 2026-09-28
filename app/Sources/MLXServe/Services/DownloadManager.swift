@@ -374,9 +374,8 @@ class DownloadManager: ObservableObject {
     /// files identify one. Twin of `model_discovery.peekLayaCheckpoint`.
     nonisolated static let layaMarkers = ["rl_agent_config.json", "encoder/config.json"]
 
-    /// The model_type a marker file decides, or nil when the dir is not one
-    /// of those shapes. Laya has no root config.json; a Kev pack has one that
-    /// names its Qwen trunk, and `kev_config.json` must win over it. Twin of
+    /// The model_type a marker file decides, or nil. Laya has no root config.json;
+    /// a Kev pack's names its Qwen trunk, so `kev_config.json` wins. Twin of
     /// `model_discovery.peekKevPack`.
     nonisolated static func markerModelType(inDir dir: String) -> String? {
         let fm = FileManager.default

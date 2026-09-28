@@ -1,10 +1,9 @@
 import XCTest
 @testable import MLXCore
 
-/// A Kev pack is a Qwen3.5 trunk plus a pointer head, so its root config.json
-/// says `qwen3_5`. `kev_config.json` is what makes it a decision model; read
-/// config.json alone and the pack is offered as a chat model it can't serve.
-/// Server twin: `model_discovery.peekKevPack`.
+/// A Kev pack's root config.json says `qwen3_5`; `kev_config.json` is what makes it a
+/// decision model, or it is offered as a chat model it can't serve. Server twin:
+/// `model_discovery.peekKevPack`.
 final class KevModelTests: XCTestCase {
 
     private func makeKevDir() throws -> (root: String, dir: String) {
