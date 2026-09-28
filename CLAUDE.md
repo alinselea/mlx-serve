@@ -435,6 +435,7 @@ Kernels + numerics:
 ### Model loading, configs, converters, media parity (→ docs/gotchas/models-media.md)
 
 Configs, templates, tokenizers:
+- **Config JSON is untrusted**: use the checked readers in `model.zig`; preserve explicit nullable defaults and return a named error before narrowing or deriving dimensions.
 - **A marker family that is GLM/`<think>` under another spelling is ALIASED at decode, never re-parsed** (K2 `<ifm|…>` → `Tokenizer.marker_aliases`); only the rendered prompt keeps the pack's spelling (`k2ThinkOpenerAt`). JSON-schema + thinking on K2 keeps thinking off (known).
 - **`generation_config.json` `eos_token_id` joins the stop set** (`mergeEosTokens`, additive); Gemma terminators merge additively (`ensureGemmaTerminators`). jinja.cpp: `is sameas true` / `is divisibleby 3` parse a BARE test argument.
 - **Config reads**: when the reference IGNORES a field, the field is not the truth (laguna YaRN mscale); a field HF allows in two SHAPES is read as both (`chat_template`; Nemotron-H's `hybrid_override_pattern` string vs `layers_block_type` list — the missed shape left every layer `.attention`); `text_config` FIRST, then root, PER FIELD; a default only ONE family wants is pinned PER LAYER TYPE (muse `rope_local_base_freq`, `tests/test_muse_repetition.sh`).
