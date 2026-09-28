@@ -273,16 +273,7 @@ fn pyJsonDepth(a: std.mem.Allocator, out: *std.ArrayList(u8), v: std.json.Value,
         .bool => |b| try out.appendSlice(a, if (b) "true" else "false"),
         .integer => |i| try out.print(a, "{d}", .{i}),
         .float => |f| try pyFloat(a, out, f),
-        .number_string => |s| {
-            if (std.mem.eql(u8, s, "-0")) {
-                try out.append(a, '0');
-            } else if (std.json.isNumberFormattedLikeAnInteger(s)) {
-                // JSON integers have no leading zeros: the text is Python's `int` repr.
-                try out.appendSlice(a, s);
-            } else {
-                try pyFloat(a, out, std.fmt.parseFloat(f64, s) catch return error.NonFiniteNumber);
-            }
-        },
+        .number_string => |s| try pyNumber(a, out, s),
         .string => |s| try pyJsonString(a, out, s, ascii),
         .array => |arr| {
             try out.append(a, '[');
@@ -307,10 +298,22 @@ fn pyJsonDepth(a: std.mem.Allocator, out: *std.ArrayList(u8), v: std.json.Value,
     }
 }
 
+/// A JSON number's text as Python writes the value `json.loads` makes of it (`-0` -> `0`, `1e5` -> `100000.0`).
+pub fn pyNumber(a: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
+    if (std.mem.eql(u8, s, "-0")) {
+        try out.append(a, '0');
+    } else if (std.json.isNumberFormattedLikeAnInteger(s)) {
+        // JSON integers have no leading zeros: the text is Python's `int` repr.
+        try out.appendSlice(a, s);
+    } else {
+        try pyFloat(a, out, std.fmt.parseFloat(f64, s) catch return error.NonFiniteNumber);
+    }
+}
+
 /// Python `float.__repr__`: shortest round-trip digits; exponent form (`1e-05`,
 /// `1.5e+300`) when the decimal point position is <= -4 or > 16, else fixed
 /// notation with at least one fraction digit (`1.0`, `-0.0`).
-fn pyFloat(a: std.mem.Allocator, out: *std.ArrayList(u8), f: f64) !void {
+pub fn pyFloat(a: std.mem.Allocator, out: *std.ArrayList(u8), f: f64) !void {
     if (!std.math.isFinite(f)) return error.NonFiniteNumber;
     var buf: [std.fmt.float.min_buffer_size]u8 = undefined;
     var sci = std.fmt.float.render(&buf, f, .{ .mode = .scientific }) catch unreachable; // "[-]D[.DDD]e[-]X"
@@ -392,7 +395,7 @@ fn pyJsonString(a: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8, as
 
 /// A string in the response body: raw UTF-8, except a string holding a lone surrogate (a
 /// question id sent as `"\ud800"`), which goes out `\u`-escaped as Python's `json.dumps` writes it.
-fn wireString(a: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
+pub fn wireString(a: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
     return pyJsonString(a, out, s, !std.unicode.utf8ValidateSlice(s));
 }
 
