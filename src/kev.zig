@@ -56,7 +56,9 @@ fn renderDepth(a: std.mem.Allocator, out: *std.ArrayList(u8), v: std.json.Value,
         .null => {},
         .bool => |b| try put(a, out, if (b) "True" else "False", budget),
         .integer, .float, .number_string => {
-            try budget.take(32); // a Python number spelling is at most ~24 bytes
+            // Integer text is copied as written (Python ints are unbounded); every other spelling fits in 32 bytes.
+            const n = if (v == .number_string and std.json.isNumberFormattedLikeAnInteger(v.number_string)) v.number_string.len else 32;
+            try budget.take(n);
             switch (v) {
                 .integer => |i| try out.print(a, "{d}", .{i}),
                 .float => |f| try laya.pyFloat(a, out, f),
@@ -438,15 +440,17 @@ pub const Engine = struct {
 
         const kc = try readKevConfig(io, allocator, dir);
         self.head_dim = kc.head_dim;
-        self.logit_scale = 1.0 / (@sqrt(@as(f32, @floatFromInt(kc.head_dim))) * kc.temperature);
+        self.logit_scale = kc.logit_scale;
 
+        try checkBaseConfig(io, allocator, dir);
         self.config = try model_mod.parseConfig(io, allocator, dir);
         errdefer self.config.deinit(allocator);
         if (!self.config.needsSsmEntries()) return error.KevUnsupportedBase;
 
         self.tok = try tokenizer_mod.loadTokenizer(io, allocator, dir);
         errdefer self.tok.deinit();
-        self.delims = try resolveDelims(&self.tok);
+        if (self.tok.definedVocabSize() > self.config.vocab_size) return error.KevVocabMismatch;
+        self.delims = try resolveDelims(&self.tok, self.config.vocab_size);
 
         const head_path = try std.fmt.allocPrint(allocator, "{s}/kev_head.safetensors", .{dir});
         defer allocator.free(head_path);
@@ -461,6 +465,7 @@ pub const Engine = struct {
         self.weights = try model_mod.loadModelWeights(io, allocator, dir, &self.config, false);
         errdefer self.weights.deinit();
         model_mod.resolveWeightPrefix(&self.config, &self.weights);
+        try checkEmbedding(allocator, &self.weights, self.config.weight_prefix, self.config.vocab_size);
         self.xfm = try transformer_mod.Transformer.init(io, allocator, self.config, &self.weights);
         self.max_questions = envLimit("MLX_SERVE_KEV_MAX_QUESTIONS", DEFAULT_MAX_QUESTIONS);
         self.max_input_tokens = envLimit("MLX_SERVE_KEV_MAX_INPUT_TOKENS", DEFAULT_MAX_INPUT_TOKENS);
@@ -649,23 +654,7 @@ pub const Engine = struct {
         defer free(picked);
         const rows = try astype(picked, .float32, s);
         defer free(rows);
-        const all_q = try linear(rows, self.q_w_t, self.head_weights.get("q.bias").?, s);
-        defer free(all_q);
-        const all_k = try linear(rows, self.k_w_t, self.head_weights.get("k.bias").?, s);
-        defer free(all_k);
-        const qd = try sliceRows(all_q, 0, 1, s); // [1, P]
-        defer free(qd);
-        const ko = try sliceRows(all_k, 1, @intCast(k + 1), s); // [K, P]
-        defer free(ko);
-        const qd_t = try transposed(qd, s);
-        defer free(qd_t);
-        const z = try matmul(ko, qd_t, s); // [K, 1]
-        defer free(z);
-        const sc = mlx.mlx_array_new_float(self.logit_scale);
-        defer free(sc);
-        const zs = try mul(z, sc, s);
-        defer free(zs);
-        const zf = try reshape(zs, &[_]c_int{@intCast(k)}, s);
+        const zf = try self.headLogits(rows, s);
         defer free(zf);
         var p = mlx.mlx_array_new();
         defer free(p);
@@ -682,9 +671,31 @@ pub const Engine = struct {
         }
         return out;
     }
+
+    /// Scaled logits `[K]` from f32 readout rows `[1+K, H]`: row 0 at `<decide>`, then each `</opt>`.
+    fn headLogits(self: *Engine, rows: A, s: S) !A {
+        const n: c_int = mlx.mlx_array_shape(rows)[0];
+        const all_q = try linear(rows, self.q_w_t, self.head_weights.get("q.bias").?, s);
+        defer free(all_q);
+        const all_k = try linear(rows, self.k_w_t, self.head_weights.get("k.bias").?, s);
+        defer free(all_k);
+        const qd = try sliceRows(all_q, 0, 1, s); // [1, P]
+        defer free(qd);
+        const ko = try sliceRows(all_k, 1, n, s); // [K, P]
+        defer free(ko);
+        const qd_t = try transposed(qd, s);
+        defer free(qd_t);
+        const z = try matmul(ko, qd_t, s); // [K, 1]
+        defer free(z);
+        const sc = mlx.mlx_array_new_float(self.logit_scale);
+        defer free(sc);
+        const zs = try mul(z, sc, s);
+        defer free(zs);
+        return reshape(zs, &[_]c_int{n - 1}, s);
+    }
 };
 
-const KevConfig = struct { head_dim: usize, temperature: f32 };
+const KevConfig = struct { head_dim: usize, logit_scale: f32 };
 
 fn readKevConfig(io: std.Io, a: std.mem.Allocator, dir: []const u8) !KevConfig {
     const path = try std.fmt.allocPrint(a, "{s}/kev_config.json", .{dir});
@@ -723,14 +734,96 @@ fn parseKevConfig(v: std.json.Value) !KevConfig {
         const d = dv.object.get(key) orelse return error.KevBadConfig;
         if (d != .string or !std.mem.eql(u8, d.string, want)) return error.KevBadConfig;
     }
-    return .{ .head_dim = @intCast(hd.integer), .temperature = @floatCast(t) };
+    // The scale is used in f32: it must survive the narrowing (a 1e-300 temperature would make it infinite).
+    const scale: f32 = @floatCast(1.0 / (@sqrt(@as(f64, @floatFromInt(hd.integer))) * t));
+    if (!std.math.isFinite(scale) or scale <= 0) return error.KevBadConfig;
+    return .{ .head_dim = @intCast(hd.integer), .logit_scale = scale };
 }
 
-fn resolveDelims(tok: *const tokenizer_mod.Tokenizer) !Delims {
+/// Every `config.json` field the shared model parser reads without checking its JSON type, with the type it
+/// assumes. Checked here first so a malformed pack is a named load error, never an unchecked union access.
+const TypedKey = struct { key: []const u8, t: std.meta.Tag(std.json.Value) };
+const UNCHECKED_CONFIG_KEYS = [_]TypedKey{
+    .{ .key = "bits", .t = .integer },                    .{ .key = "bos_token_id", .t = .integer },
+    .{ .key = "eoa_token_id", .t = .integer },            .{ .key = "full_attention_interval", .t = .integer },
+    .{ .key = "gate_activation", .t = .string },          .{ .key = "gating", .t = .string },
+    .{ .key = "group_size", .t = .integer },              .{ .key = "head_dim", .t = .integer },
+    .{ .key = "hidden_size", .t = .integer },             .{ .key = "image_token_index", .t = .integer },
+    .{ .key = "intermediate_size", .t = .integer },       .{ .key = "layernorm_num_groups", .t = .integer },
+    .{ .key = "layers_block_type", .t = .array },         .{ .key = "linear_conv_kernel_dim", .t = .integer },
+    .{ .key = "linear_key_head_dim", .t = .integer },     .{ .key = "linear_num_key_heads", .t = .integer },
+    .{ .key = "linear_num_value_heads", .t = .integer },  .{ .key = "linear_silu", .t = .bool },
+    .{ .key = "linear_value_head_dim", .t = .integer },   .{ .key = "max_position_embeddings", .t = .integer },
+    .{ .key = "model_type", .t = .string },               .{ .key = "n_shared_experts", .t = .integer },
+    .{ .key = "no_kda_lora", .t = .bool },                .{ .key = "num_attention_heads", .t = .integer },
+    .{ .key = "num_hidden_layers", .t = .integer },       .{ .key = "num_key_value_heads", .t = .integer },
+    .{ .key = "num_kv_heads_for_linear_attn", .t = .integer }, .{ .key = "qk_head_dim", .t = .integer },
+    .{ .key = "quantization", .t = .object },             .{ .key = "query_pre_attn_scalar", .t = .integer },
+    .{ .key = "rope_type", .t = .string },                .{ .key = "score_function", .t = .string },
+    .{ .key = "scoring_func", .t = .string },             .{ .key = "sliding_window_pattern", .t = .integer },
+    .{ .key = "swa_head_dim", .t = .integer },            .{ .key = "swa_num_attention_heads", .t = .integer },
+    .{ .key = "swa_num_key_value_heads", .t = .integer }, .{ .key = "text_config", .t = .object },
+    .{ .key = "topk_method", .t = .string },              .{ .key = "use_bidirectional_attention", .t = .bool },
+    .{ .key = "use_kda_lora", .t = .bool },               .{ .key = "use_mla_nope", .t = .bool },
+    .{ .key = "use_sconv", .t = .bool },                  .{ .key = "vision_config", .t = .object },
+    .{ .key = "vocab_size", .t = .integer },
+};
+
+fn checkBaseConfig(io: std.Io, a: std.mem.Allocator, dir: []const u8) !void {
+    const path = try std.fmt.allocPrint(a, "{s}/config.json", .{dir});
+    defer a.free(path);
+    const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer f.close(io);
+    var rb: [4096]u8 = undefined;
+    var rs = f.reader(io, &rb);
+    const text = try rs.interface.allocRemaining(a, .limited(4 * 1024 * 1024));
+    defer a.free(text);
+    var parsed = std.json.parseFromSlice(std.json.Value, a, text, .{}) catch return error.KevBadBaseConfig;
+    defer parsed.deinit();
+    return checkBaseConfigValue(parsed.value);
+}
+
+/// The Qwen3.5 base config a Kev pack carries: object shapes, the types the model parser assumes, and positive,
+/// bounded geometry.
+fn checkBaseConfigValue(root: std.json.Value) !void {
+    if (root != .object) return error.KevBadBaseConfig;
+    const mt = root.object.get("model_type") orelse return error.KevBadBaseConfig;
+    if (mt != .string or !(std.mem.eql(u8, mt.string, "qwen3_5") or std.mem.eql(u8, mt.string, "qwen3_5_moe")))
+        return error.KevUnsupportedBase;
+    const text = if (root.object.get("text_config")) |tc| tc else root;
+    for ([_]std.json.Value{ root, text }) |o| {
+        if (o != .object) return error.KevBadBaseConfig;
+        for (UNCHECKED_CONFIG_KEYS) |k| if (o.object.get(k.key)) |v| {
+            if (std.meta.activeTag(v) != k.t) return error.KevBadBaseConfig;
+            if (v == .integer and (v.integer < 0 or v.integer > std.math.maxInt(i32))) return error.KevBadBaseConfig;
+        };
+        if (o.object.get("quantization")) |q| for ([_][]const u8{ "bits", "group_size" }) |key| if (q.object.get(key)) |v| {
+            if (v != .integer or v.integer <= 0 or v.integer > 1024) return error.KevBadBaseConfig;
+        };
+    }
+    const geometry = [_]struct { key: []const u8, max: i64 }{
+        .{ .key = "hidden_size", .max = 65536 },   .{ .key = "num_hidden_layers", .max = 1024 },
+        .{ .key = "num_attention_heads", .max = 1024 }, .{ .key = "vocab_size", .max = 1 << 24 },
+    };
+    for (geometry) |g| {
+        const v = text.object.get(g.key) orelse return error.KevBadBaseConfig;
+        if (v.integer <= 0 or v.integer > g.max) return error.KevBadBaseConfig;
+    }
+}
+
+/// The embedding table exists and has a row for every token id the model can be fed.
+fn checkEmbedding(a: std.mem.Allocator, w: *const model_mod.Weights, prefix: []const u8, vocab: u32) !void {
+    const name = try std.fmt.allocPrint(a, "{s}.embed_tokens.weight", .{prefix});
+    defer a.free(name);
+    const t = w.get(name) orelse return error.KevBadEmbedding;
+    if (mlx.mlx_array_ndim(t) != 2 or mlx.mlx_array_shape(t)[0] != @as(c_int, @intCast(vocab))) return error.KevBadEmbedding;
+}
+
+fn resolveDelims(tok: *const tokenizer_mod.Tokenizer, vocab: u32) !Delims {
     var ids: [DELIMITERS.len]u32 = undefined;
     for (DELIMITERS, &ids, 0..) |name, *id, i| {
         id.* = tok.specialTokenId(name) orelse tok.vocab.get(name) orelse return error.KevMissingDelimiter;
-        if (id.* >= tok.definedVocabSize()) return error.KevMissingDelimiter;
+        if (id.* >= vocab) return error.KevMissingDelimiter;
         for (ids[0..i]) |prev| if (prev == id.*) return error.KevMissingDelimiter;
     }
     return .{ .state = ids[0], .q = ids[1], .opt = ids[2], .close = ids[3], .decide = ids[4] };
@@ -972,6 +1065,7 @@ test "kev: kev_config.json is refused unless it is exactly the converter's forma
         defer p.deinit();
         const kc = try parseKevConfig(p.value);
         try testing.expectEqual(@as(usize, 256), kc.head_dim);
+        try testing.expectApproxEqAbs(@as(f32, 1.0 / (16.0 * 2.4)), kc.logit_scale, 1e-7);
     }
     const bad = [_][]const u8{
         "[]",
@@ -980,6 +1074,9 @@ test "kev: kev_config.json is refused unless it is exactly the converter's forma
         "{\"format\": \"kev\", \"format_version\": 1, \"head_dim\": 0, \"temperature\": 1}",
         "{\"format\": \"kev\", \"format_version\": 1, \"head_dim\": 256, \"temperature\": 0}",
         "{\"format\": \"kev\", \"format_version\": 1, \"head_dim\": 256, \"temperature\": -1}",
+        // Positive and finite in f64, but the f32 scale would be infinite or zero.
+        "{\"format\": \"kev\", \"format_version\": 1, \"head_dim\": 256, \"temperature\": 1e-300, \"delimiters\": {\"state\": \"<|fim_prefix|>\", \"question\": \"<|fim_middle|>\", \"option\": \"<|box_start|>\", \"option_end\": \"<|box_end|>\", \"decide\": \"<|fim_suffix|>\"}}",
+        "{\"format\": \"kev\", \"format_version\": 1, \"head_dim\": 256, \"temperature\": 1e300, \"delimiters\": {\"state\": \"<|fim_prefix|>\", \"question\": \"<|fim_middle|>\", \"option\": \"<|box_start|>\", \"option_end\": \"<|box_end|>\", \"decide\": \"<|fim_suffix|>\"}}",
         "{\"format\": \"kev\", \"format_version\": 1, \"head_dim\": 256, \"temperature\": 1, \"delimiters\": {}}",
         "{\"format\": \"kev\", \"format_version\": 1, \"head_dim\": 256, \"temperature\": 1, \"delimiters\": {\"state\": \"<|im_start|>\", \"question\": \"<|fim_middle|>\", \"option\": \"<|box_start|>\", \"option_end\": \"<|box_end|>\", \"decide\": \"<|fim_suffix|>\"}}",
     };
@@ -1003,9 +1100,10 @@ fn testIo() std.Io {
 }
 
 // Oracle: KEV_TEST_MODEL = a pack from tests/convert_kev_weights.py, KEV_FIXTURES = tests/fixtures/kev from
-// tests/dump_kev_fixtures.py on the same checkpoint. Bar: token ids exact; probabilities within 0.01 (both sides run
-// bf16 with different kernels; kev's own bf16 path sits within ~0.017 of its fp32 one); same argmax unless the
-// reference's top two are within 0.01 of each other.
+// tests/dump_kev_fixtures.py on the same checkpoint. Bars: token ids exact; the head on kev's own hidden rows
+// within 1e-3 of kev's logits (it is the same f32 math); the trunk's readout rows at cosine >= 0.99 of kev's
+// (both run bf16, or our 8-bit pack, through different kernels); probabilities within 0.01; the same argmax
+// unless kev's top two are within 0.01. Every argmax difference is printed, acquitted or not.
 test "kev: oracle against kev's MLX backend (KEV_TEST_MODEL + KEV_FIXTURES)" {
     const model_dir = std.mem.sliceTo(std.c.getenv("KEV_TEST_MODEL") orelse return error.SkipZigTest, 0);
     const fix_dir = std.mem.sliceTo(std.c.getenv("KEV_FIXTURES") orelse return error.SkipZigTest, 0);
@@ -1017,16 +1115,13 @@ test "kev: oracle against kev's MLX backend (KEV_TEST_MODEL + KEV_FIXTURES)" {
 
     const path = try std.fmt.allocPrint(a, "{s}/cases.json", .{fix_dir});
     defer a.free(path);
-    const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
-    defer f.close(io);
-    var rb: [4096]u8 = undefined;
-    var rs = f.reader(io, &rb);
-    const text = try rs.interface.allocRemaining(a, .limited(64 * 1024 * 1024));
+    const text = try readTestFile(a, path);
     defer a.free(text);
     var fx = try std.json.parseFromSlice(std.json.Value, a, text, .{});
     defer fx.deinit();
 
     var worst: f64 = 0;
+    var flips: usize = 0;
     for (fx.value.object.get("cases").?.array.items) |c| {
         const name = c.object.get("name").?.string;
         const req = c.object.get("request").?.object;
@@ -1039,12 +1134,17 @@ test "kev: oracle against kev's MLX backend (KEV_TEST_MODEL + KEV_FIXTURES)" {
         try testing.expectEqualStrings(c.object.get("record").?.object.get("state").?.string, st.items);
 
         // Token layout: the packed kev encoding is the state followed by every branch.
-        var packed_ids: std.ArrayList(u32) = .empty;
-        defer packed_ids.deinit(a);
-        try packed_ids.append(a, engine.delims.state);
+        var state_ids: std.ArrayList(u32) = .empty;
+        defer state_ids.deinit(a);
+        try state_ids.append(a, engine.delims.state);
         const stt = try engine.userTokens(a, st.items);
         defer a.free(stt);
-        try packed_ids.appendSlice(a, stt);
+        try state_ids.appendSlice(a, stt);
+        var packed_ids: std.ArrayList(u32) = .empty;
+        defer packed_ids.deinit(a);
+        try packed_ids.appendSlice(a, state_ids.items);
+        var b0 = try engine.buildBranch(a, &qs.qs[0]);
+        defer b0.deinit(a);
         for (qs.qs) |*q| {
             var b = try engine.buildBranch(a, q);
             defer b.deinit(a);
@@ -1054,40 +1154,137 @@ test "kev: oracle against kev's MLX backend (KEV_TEST_MODEL + KEV_FIXTURES)" {
         try testing.expectEqual(want_ids.len, packed_ids.items.len);
         for (want_ids, packed_ids.items) |w, got| try testing.expectEqual(@as(u32, @intCast(w.integer)), got);
 
+        // Head alone, on kev's own readout rows (question 0, row form).
+        const logits_name = try std.fmt.allocPrint(a, "{s}/logits_{s}.npy", .{ fix_dir, name });
+        defer a.free(logits_name);
+        const want_z = try readNpyF32(a, logits_name);
+        defer a.free(want_z);
+        var head_err: f32 = 0;
+        var trunk_cos: f64 = std.math.nan(f64); // stays NaN when the case has no saved hidden rows
+        var trunk_rms: f64 = std.math.nan(f64);
+        const hidden_name = try std.fmt.allocPrint(a, "{s}/hidden_{s}.npy", .{ fix_dir, name });
+        defer a.free(hidden_name);
+        if (readNpyF32(a, hidden_name)) |want_h| {
+            defer a.free(want_h);
+            const hsz: usize = engine.config.hidden_size;
+            const rows_n: usize = want_h.len / hsz;
+            const shape = [_]c_int{ @intCast(rows_n), @intCast(hsz) };
+            const kev_rows = mlx.mlx_array_new_data(want_h.ptr, &shape, 2, .float32);
+            defer free(kev_rows);
+            const z = try engine.headLogits(kev_rows, s);
+            defer free(z);
+            try mlx.check(mlx.mlx_array_eval(z));
+            for (mlx.mlx_array_data_float32(z).?[0 .. rows_n - 1], want_z) |g, w| head_err = @max(head_err, @abs(g - w));
+
+            // Trunk alone: question 0 as one causal row from an empty cache, readout rows vs kev's.
+            const got_h = try rowReadouts(engine, a, state_ids.items, &b0);
+            defer a.free(got_h);
+            var dot: f64 = 0;
+            var nw: f64 = 0;
+            var ng: f64 = 0;
+            for (got_h, want_h) |g, w| {
+                dot += @as(f64, g) * w;
+                ng += @as(f64, g) * g;
+                nw += @as(f64, w) * w;
+            }
+            trunk_cos = dot / @sqrt(ng * nw);
+            trunk_rms = @sqrt(ng / nw);
+        } else |_| {}
+
         var ntok: usize = 0;
         const probs = try engine.score(a, st.items, qs.qs, &ntok);
         defer {
             for (probs) |p| a.free(p);
             a.free(probs);
         }
+        var case_worst: f64 = 0;
         for (c.object.get("probs").?.array.items, probs, 0..) |want, got, qi| {
-            var wbest: usize = 0;
-            for (want.array.items, got, 0..) |wv, gv, j| {
-                const w: f64 = switch (wv) {
-                    .float => |x| x,
-                    .integer => |x| @floatFromInt(x),
-                    else => unreachable,
-                };
-                worst = @max(worst, @abs(w - gv));
-                const wb: f64 = switch (want.array.items[wbest]) {
-                    .float => |x| x,
-                    .integer => |x| @floatFromInt(x),
-                    else => unreachable,
-                };
-                if (w > wb) wbest = j;
-                if (@abs(w - gv) > 1e-2) {
-                    std.debug.print("kev oracle {s} q{d} option {d}: want {d:.6} got {d:.6}\n", .{ name, qi, j, w, gv });
-                    return error.TestUnexpectedResult;
-                }
-            }
-            if (wbest != argmax(got)) {
-                const top = numOf(want.array.items[wbest]);
-                const other = numOf(want.array.items[argmax(got)]);
-                if (top - other > 1e-2) return error.TestUnexpectedResult;
+            const wp = try a.alloc(f64, want.array.items.len);
+            defer a.free(wp);
+            for (want.array.items, wp) |wv, *x| x.* = numOf(wv);
+            for (wp, got) |w, g| case_worst = @max(case_worst, @abs(w - g));
+            const wb = argmax(wp);
+            const gb = argmax(got);
+            if (wb != gb) {
+                flips += 1;
+                std.debug.print("kev oracle {s} q{d}: argmax {d} (kev) vs {d}, kev margin {d:.5}\n", .{ name, qi, wb, gb, wp[wb] - wp[gb] });
+                try testing.expect(wp[wb] - wp[gb] <= 1e-2);
             }
         }
+        worst = @max(worst, case_worst);
+        std.debug.print("kev oracle {s}: max|dp| {d:.5}  head|dz| {d:.6}  trunk cos {d:.6} rms {d:.4}\n", .{ name, case_worst, head_err, trunk_cos, trunk_rms });
+        try testing.expect(case_worst <= 1e-2);
+        try testing.expect(head_err <= 1e-3);
+        try testing.expect(std.math.isNan(trunk_cos) or trunk_cos >= 0.99);
     }
-    std.debug.print("kev oracle: {d} cases, max |dp| {e}\n", .{ fx.value.object.get("cases").?.array.items.len, worst });
+    std.debug.print("kev oracle: {d} cases, max |dp| {e}, argmax flips {d}\n", .{ fx.value.object.get("cases").?.array.items.len, worst, flips });
+}
+
+/// Question 0's readout rows `[1+K, H]` (f32, flattened) as ONE causal row from an empty cache: kev's row form,
+/// the shape the hidden fixtures were dumped in.
+fn rowReadouts(engine: *Engine, a: std.mem.Allocator, state_ids: []const u32, b: *const Branch) ![]f32 {
+    const s = engine.stream;
+    const row = try std.mem.concat(a, u32, &.{ state_ids, b.ids });
+    defer a.free(row);
+    var cache = try transformer_mod.KVCache.init(a, engine.config.num_hidden_layers);
+    defer cache.deinit();
+    const entries = try a.alloc(transformer_mod.SSMCacheEntry, engine.config.num_hidden_layers);
+    for (entries) |*e| e.* = .{ .conv_state = mlx.mlx_array_new(), .ssm_state = mlx.mlx_array_new(), .initialized = false };
+    defer {
+        for (entries) |*e| {
+            free(e.conv_state);
+            free(e.ssm_state);
+            transformer_mod.ssmFreeQsaState(e);
+        }
+        a.free(entries);
+    }
+    var offset: usize = 0;
+    var ctx = engine.xfm.defaultCtx();
+    ctx.cache = &cache;
+    ctx.moe_seq_offset = &offset;
+    ctx.ssm_entries = entries;
+    ctx.capture_hidden = null;
+    ctx.skip_lm_head = true;
+    const h = try engine.forwardIds(&ctx, row);
+    defer free(h);
+    const idx_host = try a.alloc(i32, b.closes.len + 1);
+    defer a.free(idx_host);
+    idx_host[0] = @intCast(state_ids.len + b.decide);
+    for (b.closes, 1..) |cl, i| idx_host[i] = @intCast(state_ids.len + cl);
+    const idx_shape = [_]c_int{@intCast(idx_host.len)};
+    const idx = mlx.mlx_array_new_data(idx_host.ptr, &idx_shape, 1, .int32);
+    defer free(idx);
+    const flat = try reshape(h, &[_]c_int{ -1, @intCast(engine.config.hidden_size) }, s);
+    defer free(flat);
+    const picked = try take(flat, idx, 0, s);
+    defer free(picked);
+    const rows = try astype(picked, .float32, s);
+    defer free(rows);
+    try mlx.check(mlx.mlx_array_eval(rows));
+    return a.dupe(f32, mlx.mlx_array_data_float32(rows).?[0..mlx.mlx_array_size(rows)]);
+}
+
+fn readTestFile(a: std.mem.Allocator, path: []const u8) ![]u8 {
+    const io = testIo();
+    const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer f.close(io);
+    var rb: [4096]u8 = undefined;
+    var rs = f.reader(io, &rb);
+    return rs.interface.allocRemaining(a, .limited(64 * 1024 * 1024));
+}
+
+/// Minimal `.npy` reader (tests only): little-endian float32, C order.
+fn readNpyF32(a: std.mem.Allocator, path: []const u8) ![]f32 {
+    const bytes = try readTestFile(a, path);
+    defer a.free(bytes);
+    if (bytes.len < 10 or !std.mem.eql(u8, bytes[0..6], "\x93NUMPY")) return error.BadNpy;
+    const major = bytes[6];
+    const header_len: usize = if (major == 1) std.mem.readInt(u16, bytes[8..10], .little) else std.mem.readInt(u32, bytes[8..12], .little);
+    const data_start: usize = (if (major == 1) @as(usize, 10) else 12) + header_len;
+    if (std.mem.indexOf(u8, bytes[0..data_start], "<f4") == null) return error.BadNpy;
+    const out = try a.alloc(f32, (bytes.len - data_start) / 4);
+    @memcpy(std.mem.sliceAsBytes(out), bytes[data_start .. data_start + out.len * 4]);
+    return out;
 }
 
 test "kev: rendering is budgeted while it runs, nested copies included" {
@@ -1148,4 +1345,48 @@ test "kev: a lone surrogate in text the model reads is refused by name" {
     try testing.expectError(error.LoneSurrogate, Questions.init(a, parsed.value, 64));
     try testing.expect(errorMessage(error.LoneSurrogate) != null);
     try testing.expect(errorMessage(error.KevChoiceCriteria) != null);
+}
+
+test "kev: integer text is charged at its real length" {
+    const a = testing.allocator;
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(a);
+    try body.appendSlice(a, "[");
+    for (0..8) |i| {
+        if (i > 0) try body.append(a, ',');
+        try body.appendNTimes(a, '7', 4096);
+    }
+    try body.append(a, ']');
+    var parsed = try laya.parseRequestJson(a, body.items);
+    defer parsed.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    var small: Budget = .{ .left = 16 * 1024 };
+    try testing.expectError(error.KevRenderTooLarge, render(a, &out, parsed.value, 0, &small));
+}
+
+test "kev: a pack's base config is checked before the shared parser reads it" {
+    const a = testing.allocator;
+    const good = "{\"model_type\": \"qwen3_5\", \"text_config\": {\"hidden_size\": 2560, \"num_hidden_layers\": 32, \"num_attention_heads\": 16, \"vocab_size\": 248320}}";
+    const bad = [_]struct { json: []const u8, err: anyerror }{
+        .{ .json = "[]", .err = error.KevBadBaseConfig },
+        .{ .json = "{\"model_type\": \"gemma3\"}", .err = error.KevUnsupportedBase },
+        .{ .json = "{\"model_type\": \"nemotron_h\"}", .err = error.KevUnsupportedBase },
+        .{ .json = "{\"model_type\": \"qwen3_5\", \"text_config\": []}", .err = error.KevBadBaseConfig },
+        .{ .json = "{\"model_type\": \"qwen3_5\", \"text_config\": {\"hidden_size\": \"2560\", \"num_hidden_layers\": 32, \"num_attention_heads\": 16, \"vocab_size\": 1}}", .err = error.KevBadBaseConfig },
+        .{ .json = "{\"model_type\": \"qwen3_5\", \"text_config\": {\"hidden_size\": 0, \"num_hidden_layers\": 32, \"num_attention_heads\": 16, \"vocab_size\": 1}}", .err = error.KevBadBaseConfig },
+        .{ .json = "{\"model_type\": \"qwen3_5\", \"text_config\": {\"hidden_size\": -5, \"num_hidden_layers\": 32, \"num_attention_heads\": 16, \"vocab_size\": 1}}", .err = error.KevBadBaseConfig },
+        .{ .json = "{\"model_type\": \"qwen3_5\", \"quantization\": {\"bits\": \"8\"}, \"text_config\": {\"hidden_size\": 1, \"num_hidden_layers\": 1, \"num_attention_heads\": 1, \"vocab_size\": 1}}", .err = error.KevBadBaseConfig },
+        .{ .json = "{\"model_type\": \"qwen3_5\", \"text_config\": {\"hidden_size\": 2560, \"num_hidden_layers\": 32, \"num_attention_heads\": 16}}", .err = error.KevBadBaseConfig },
+    };
+    {
+        var p = try std.json.parseFromSlice(std.json.Value, a, good, .{});
+        defer p.deinit();
+        try checkBaseConfigValue(p.value);
+    }
+    for (bad) |b| {
+        var p = try std.json.parseFromSlice(std.json.Value, a, b.json, .{});
+        defer p.deinit();
+        try testing.expectError(b.err, checkBaseConfigValue(p.value));
+    }
 }

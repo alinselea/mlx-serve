@@ -5,7 +5,8 @@ USER-RUN, from a kev checkout with its serve extras (mlx-lm, torch, huggingface_
     cd ~/kev && uv run --extra serve python /path/to/mlx-serve/tests/convert_kev_weights.py \\
         jaredpalmer/kev-4b --out ~/.mlx-serve/models/jaredpalmer/Kev-4B-MLX-Serve-8bit --q-bits 8
 Produces the dir `src/kev.zig` loads:
-    <out>/config.json, model*.safetensors, tokenizer files   the base Qwen3.5 text model with the LoRA MERGED
+    <out>/config.json, model*.safetensors   the base Qwen3.5 text model with the LoRA MERGED
+    <out>/tokenizer files        kev's tokenizer (the pinned base's, as transformers loads it)
     <out>/kev_head.safetensors   pointer head: q.weight [P,H], q.bias [P], k.weight [P,H], k.bias [P], f32
     <out>/kev_config.json        {"format": "kev", "format_version": 1, "head_dim", "temperature", "delimiters", "source"}
 
@@ -25,7 +26,7 @@ WHY EACH STEP EXISTS
 v1 supports LoRA checkpoints on the hybrid Qwen3.5 bases, the ones kev serves on MLX. Full-weight,
 option-isolation and trained-token-embedding checkpoints are refused by name.
 """
-import argparse, json, os, shutil, sys
+import argparse, json, os, sys
 from pathlib import Path
 
 import mlx.core as mx
@@ -35,10 +36,7 @@ from mlx_lm.utils import load_config, load_model, quantize_model, save_config, s
 
 from kev.checkpoint import resolve_run
 from kev.mlx_model import merge_lora
-from kev.model import SPECIAL
-
-TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "added_tokens.json",
-                   "vocab.json", "merges.txt", "chat_template.jinja")
+from kev.model import SPECIAL, load_tokenizer
 
 
 def read_head(run_dir):
@@ -93,10 +91,9 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     save_model(out, lm, donate_model=True)
     save_config(cfg, out / "config.json")
-    for name in TOKENIZER_FILES:
-        src = run_dir / name if (run_dir / name).exists() else base_dir / name
-        if src.exists():
-            shutil.copyfile(src, out / name)
+    # The tokenizer kev uses: the pinned base's, as transformers assembles it (tokenizer_config.json adds tokens
+    # such as <think> that the raw tokenizer.json lacks). Saved from that object, never copied from a run.
+    load_tokenizer(meta["base"], revision=meta.get("base_revision")).save_pretrained(str(out))
     mx.save_safetensors(str(out / "kev_head.safetensors"), {k: mx.array(v.numpy()) for k, v in head.items()})
     with open(out / "kev_config.json", "w") as f:
         json.dump({"format": "kev", "format_version": 1, "head_dim": head_dim, "temperature": temperature,
