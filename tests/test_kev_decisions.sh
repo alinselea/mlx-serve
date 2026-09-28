@@ -78,10 +78,12 @@ for c in fx["cases"]:
     if worst > 0.01: problems.append(f"max|diff| {worst:.4f}")
     if got["usage"]["input_tokens"] != len(c["ids"]): problems.append(f"input_tokens {got['usage']['input_tokens']} != {len(c['ids'])}")
     out.append(c["name"] + ("" if not problems else ": " + "; ".join(problems)))
-print(" | ".join(out))
+print(f"{len(out)} cases: " + " | ".join(out))
+sys.exit(1 if not out or any(":" in o for o in out) else 0)
 EOF
 )"
-case "$PAR" in *:*) bad "fixture parity: $PAR";; *) ok "8 fixture cases within 0.01, token counts equal: $PAR";; esac
+RC=$?
+if [ "$RC" -eq 0 ] && [ -n "$PAR" ]; then ok "fixture parity within 0.01, token counts equal: $PAR"; else bad "fixture parity (exit $RC): $PAR"; fi
 
 echo "=== request validation (Kev's rules, named 400s) ==="
 expect_code "missing questions -> 400" 400 "{\"model\":\"$MODEL_ID\",\"state\":\"x\"}"
@@ -136,7 +138,7 @@ diff = max(abs(a[k]["probabilities"][l] - b[k]["probabilities"][l]) for a, b in 
 print("same" if list(together) == list(qs) and list(reversed_) == list(reversed(list(qs))) and diff == 0 else f"differ {diff}")
 EOF
 )"
-check "12 mixed-length questions == each alone == reversed == after another state (bit-identical)" "$ISO" "same"
+check "12 mixed-length questions == each alone == reversed == after another state (identical HTTP output)" "$ISO" "same"
 
 echo "=== concurrent requests and a failed request in between ==="
 CONC="$(python3 - "$PORT" "$MODEL_ID" <<'EOF'

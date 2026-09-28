@@ -446,6 +446,7 @@ pub const Engine = struct {
         self.config = try model_mod.parseConfig(io, allocator, dir);
         errdefer self.config.deinit(allocator);
         if (!self.config.needsSsmEntries()) return error.KevUnsupportedBase;
+        try checkGeometry(&self.config);
 
         self.tok = try tokenizer_mod.loadTokenizer(io, allocator, dir);
         errdefer self.tok.deinit();
@@ -465,7 +466,7 @@ pub const Engine = struct {
         self.weights = try model_mod.loadModelWeights(io, allocator, dir, &self.config, false);
         errdefer self.weights.deinit();
         model_mod.resolveWeightPrefix(&self.config, &self.weights);
-        try checkEmbedding(allocator, &self.weights, self.config.weight_prefix, self.config.vocab_size);
+        try checkEmbedding(allocator, &self.weights, self.config.weight_prefix, self.config.vocab_size, self.config.hidden_size);
         self.xfm = try transformer_mod.Transformer.init(io, allocator, self.config, &self.weights);
         self.max_questions = envLimit("MLX_SERVE_KEV_MAX_QUESTIONS", DEFAULT_MAX_QUESTIONS);
         self.max_input_tokens = envLimit("MLX_SERVE_KEV_MAX_INPUT_TOKENS", DEFAULT_MAX_INPUT_TOKENS);
@@ -811,12 +812,50 @@ fn checkBaseConfigValue(root: std.json.Value) !void {
     }
 }
 
-/// The embedding table exists and has a row for every token id the model can be fed.
-fn checkEmbedding(a: std.mem.Allocator, w: *const model_mod.Weights, prefix: []const u8, vocab: u32) !void {
-    const name = try std.fmt.allocPrint(a, "{s}.embed_tokens.weight", .{prefix});
+/// The embedding table and its quantization companions have a row for every token id the model can be fed, and
+/// their widths agree with the hidden size (the forward gathers the same ids from all three).
+fn checkEmbedding(a: std.mem.Allocator, w: *const model_mod.Weights, prefix: []const u8, vocab: u32, hidden: u32) !void {
+    const rows: c_int = @intCast(vocab);
+    const t = try getNamed(a, w, prefix, "weight") orelse return error.KevBadEmbedding;
+    if (mlx.mlx_array_ndim(t) != 2 or mlx.mlx_array_shape(t)[0] != rows) return error.KevBadEmbedding;
+    const cols: u64 = @intCast(mlx.mlx_array_shape(t)[1]);
+    const scales = try getNamed(a, w, prefix, "scales") orelse {
+        // Dense: one float row of hidden_size per token.
+        const dt = mlx.mlx_array_dtype(t);
+        if (cols != hidden or !(dt == .bfloat16 or dt == .float16 or dt == .float32)) return error.KevBadEmbedding;
+        return;
+    };
+    // Affine-quantized: packed uint32 words, scales/biases one column per group.
+    if (mlx.mlx_array_dtype(t) != .uint32 or cols * 32 % hidden != 0) return error.KevBadEmbedding;
+    const bits = cols * 32 / hidden;
+    if (!(bits == 2 or bits == 3 or bits == 4 or bits == 5 or bits == 6 or bits == 8)) return error.KevBadEmbedding;
+    for ([_]?A{ scales, try getNamed(a, w, prefix, "biases") }) |maybe| {
+        const c = maybe orelse return error.KevBadEmbedding;
+        if (mlx.mlx_array_ndim(c) != 2 or mlx.mlx_array_shape(c)[0] != rows) return error.KevBadEmbedding;
+        const groups: u64 = @intCast(mlx.mlx_array_shape(c)[1]);
+        if (groups == 0 or hidden % groups != 0) return error.KevBadEmbedding;
+    }
+}
+
+fn getNamed(a: std.mem.Allocator, w: *const model_mod.Weights, prefix: []const u8, leaf: []const u8) !?A {
+    const name = try std.fmt.allocPrint(a, "{s}.embed_tokens.{s}", .{ prefix, leaf });
     defer a.free(name);
-    const t = w.get(name) orelse return error.KevBadEmbedding;
-    if (mlx.mlx_array_ndim(t) != 2 or mlx.mlx_array_shape(t)[0] != @as(c_int, @intCast(vocab))) return error.KevBadEmbedding;
+    return w.get(name);
+}
+
+/// Parsed geometry the Qwen3.5 forward divides and multiplies by: positive, bounded, and compatible head ratios.
+fn checkGeometry(c: *const model_mod.ModelConfig) !void {
+    const bounded = [_]struct { v: u32, max: u32 }{
+        .{ .v = c.hidden_size, .max = 65536 },        .{ .v = c.num_hidden_layers, .max = 1024 },
+        .{ .v = c.num_attention_heads, .max = 1024 }, .{ .v = c.num_key_value_heads, .max = 1024 },
+        .{ .v = c.head_dim, .max = 1024 },            .{ .v = c.vocab_size, .max = 1 << 24 },
+        .{ .v = c.intermediate_size, .max = 1 << 20 }, .{ .v = c.linear_num_key_heads, .max = 1024 },
+        .{ .v = c.linear_num_value_heads, .max = 1024 }, .{ .v = c.linear_key_head_dim, .max = 1024 },
+        .{ .v = c.linear_value_head_dim, .max = 1024 }, .{ .v = c.linear_conv_kernel_dim, .max = 64 },
+    };
+    for (bounded) |b| if (b.v == 0 or b.v > b.max) return error.KevBadBaseConfig;
+    if (c.num_attention_heads % c.num_key_value_heads != 0) return error.KevBadBaseConfig;
+    if (c.linear_num_value_heads % c.linear_num_key_heads != 0) return error.KevBadBaseConfig;
 }
 
 fn resolveDelims(tok: *const tokenizer_mod.Tokenizer, vocab: u32) !Delims {
@@ -1101,8 +1140,8 @@ fn testIo() std.Io {
 
 // Oracle: KEV_TEST_MODEL = a pack from tests/convert_kev_weights.py, KEV_FIXTURES = tests/fixtures/kev from
 // tests/dump_kev_fixtures.py on the same checkpoint. Bars: token ids exact; the head on kev's own hidden rows
-// within 1e-3 of kev's logits (it is the same f32 math); the trunk's readout rows at cosine >= 0.99 of kev's
-// (both run bf16, or our 8-bit pack, through different kernels); probabilities within 0.01; the same argmax
+// within 1e-3 of kev's logits (it is the same f32 math); the trunk's readout rows at cosine >= 0.99 and RMS within
+// 1% of kev's (both run bf16, or our 8-bit pack, through different kernels); probabilities within 0.01; the same argmax
 // unless kev's top two are within 0.01. Every argmax difference is printed, acquitted or not.
 test "kev: oracle against kev's MLX backend (KEV_TEST_MODEL + KEV_FIXTURES)" {
     const model_dir = std.mem.sliceTo(std.c.getenv("KEV_TEST_MODEL") orelse return error.SkipZigTest, 0);
@@ -1164,7 +1203,8 @@ test "kev: oracle against kev's MLX backend (KEV_TEST_MODEL + KEV_FIXTURES)" {
         var trunk_rms: f64 = std.math.nan(f64);
         const hidden_name = try std.fmt.allocPrint(a, "{s}/hidden_{s}.npy", .{ fix_dir, name });
         defer a.free(hidden_name);
-        if (readNpyF32(a, hidden_name)) |want_h| {
+        const has_hidden = !std.mem.eql(u8, name, "wide"); // the one case dumped without hidden rows (size)
+        if (!has_hidden) {} else if (readNpyF32(a, hidden_name)) |want_h| {
             defer a.free(want_h);
             const hsz: usize = engine.config.hidden_size;
             const rows_n: usize = want_h.len / hsz;
@@ -1189,7 +1229,7 @@ test "kev: oracle against kev's MLX backend (KEV_TEST_MODEL + KEV_FIXTURES)" {
             }
             trunk_cos = dot / @sqrt(ng * nw);
             trunk_rms = @sqrt(ng / nw);
-        } else |_| {}
+        } else |err| return err;
 
         var ntok: usize = 0;
         const probs = try engine.score(a, st.items, qs.qs, &ntok);
@@ -1215,7 +1255,10 @@ test "kev: oracle against kev's MLX backend (KEV_TEST_MODEL + KEV_FIXTURES)" {
         std.debug.print("kev oracle {s}: max|dp| {d:.5}  head|dz| {d:.6}  trunk cos {d:.6} rms {d:.4}\n", .{ name, case_worst, head_err, trunk_cos, trunk_rms });
         try testing.expect(case_worst <= 1e-2);
         try testing.expect(head_err <= 1e-3);
-        try testing.expect(std.math.isNan(trunk_cos) or trunk_cos >= 0.99);
+        if (has_hidden) {
+            try testing.expect(trunk_cos >= 0.99);
+            try testing.expect(@abs(trunk_rms - 1.0) <= 0.01);
+        }
     }
     std.debug.print("kev oracle: {d} cases, max |dp| {e}, argmax flips {d}\n", .{ fx.value.object.get("cases").?.array.items.len, worst, flips });
 }
@@ -1389,4 +1432,27 @@ test "kev: a pack's base config is checked before the shared parser reads it" {
         defer p.deinit();
         try testing.expectError(b.err, checkBaseConfigValue(p.value));
     }
+}
+
+test "kev: parsed geometry must be usable by the Qwen3.5 forward" {
+    var c = model_mod.ModelConfig{};
+    c.hidden_size = 2560;
+    c.num_hidden_layers = 32;
+    c.num_attention_heads = 16;
+    c.num_key_value_heads = 4;
+    c.head_dim = 256;
+    c.vocab_size = 248320;
+    c.intermediate_size = 9216;
+    c.linear_num_key_heads = 16;
+    c.linear_num_value_heads = 32;
+    try checkGeometry(&c);
+    var z = c;
+    z.linear_num_key_heads = 0;
+    try testing.expectError(error.KevBadBaseConfig, checkGeometry(&z));
+    var r = c;
+    r.num_key_value_heads = 3;
+    try testing.expectError(error.KevBadBaseConfig, checkGeometry(&r));
+    var big = c;
+    big.linear_key_head_dim = std.math.maxInt(u32);
+    try testing.expectError(error.KevBadBaseConfig, checkGeometry(&big));
 }

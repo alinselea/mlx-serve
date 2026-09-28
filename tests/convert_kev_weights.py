@@ -54,8 +54,9 @@ def read_head(run_dir):
     if p != meta.get("head_dim", p) or head["k.weight"].shape != (p, h) or head["q.bias"].shape != (p,) or head["k.bias"].shape != (p,):
         sys.exit("head tensor shapes disagree with each other or with head_dim")
     t = float(meta.get("temperature", 1.0))
-    if not (np.isfinite(t) and t > 0):
-        sys.exit(f"temperature must be finite and positive, got {t}")
+    scale = np.float32(1.0 / (np.sqrt(float(p)) * t)) if np.isfinite(t) and 0 < t <= 1e6 else np.float32("nan")
+    if not (np.isfinite(scale) and scale > 0):   # the same rule the server applies when it loads the pack
+        sys.exit(f"temperature {t} gives no usable f32 logit scale")
     if not all(torch.isfinite(v).all() for v in head.values()):
         sys.exit("head weights contain non-finite values")
     return head, p, t, meta

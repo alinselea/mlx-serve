@@ -94,8 +94,10 @@ def main():
             "ids": enc["ids"], "seg": enc["seg"], "pos": enc["pos"], "decide_idx": enc["decide_idx"], "opt_idx": enc["opt_idx"],
             "probs": probs, "answers": to_answers(probs, qmeta)})
         print(f"{name}: {len(enc['ids'])} tokens, {len(rows)} question(s)")
-    with open(os.path.join(OUT, "cases.json"), "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, indent=1)
+    cases = out.pop("cases")
+    with open(os.path.join(OUT, "cases.json"), "w", encoding="utf-8") as f:   # one case per line: a readable diff
+        head = json.dumps(out, ensure_ascii=False)[:-1]
+        f.write(head + ', "cases": [\n' + ",\n".join(json.dumps(c, ensure_ascii=False) for c in cases) + "\n]}\n")
     print("wrote", OUT)
 
 
