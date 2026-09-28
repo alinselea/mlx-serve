@@ -184,9 +184,20 @@ fn parseQuestion(a: std.mem.Allocator, id: []const u8, v: std.json.Value, budget
             break :blk 2;
         },
         .choice => blk: {
+            // kev takes {label: description}; a list of unique labels, as Laya
+            // also accepts, is the same with no descriptions.
             const cv = crit orelse return error.KevChoiceCriteria;
-            if (cv != .object or cv.object.count() == 0 or cv.object.count() > MAX_OPTIONS) return error.KevChoiceCriteria;
-            break :blk cv.object.count();
+            const n = switch (cv) {
+                .object => |o| o.count(),
+                .array => |l| l.items.len,
+                else => return error.KevChoiceCriteria,
+            };
+            if (n == 0 or n > MAX_OPTIONS) return error.KevChoiceCriteria;
+            if (cv == .array) for (cv.array.items, 0..) |x, i| {
+                if (x != .string) return error.KevChoiceCriteria;
+                for (cv.array.items[0..i]) |y| if (std.mem.eql(u8, x.string, y.string)) return error.KevChoiceCriteria;
+            };
+            break :blk n;
         },
         .score => blk: {
             const cv = crit orelse return error.KevScoreCriteria;
@@ -211,11 +222,20 @@ fn parseQuestion(a: std.mem.Allocator, id: []const u8, v: std.json.Value, budget
         .choice => {
             const n = try a.alloc([]const u8, n_opts);
             names = n;
-            var it = crit.?.object.iterator();
-            var i: usize = 0;
-            while (it.next()) |kv| : (i += 1) {
-                n[i] = kv.key_ptr.*;
-                opts.appendAssumeCapacity(try optionText(a, kv.key_ptr.*, kv.value_ptr.*, budget));
+            switch (crit.?) {
+                .object => |o| {
+                    var it = o.iterator();
+                    var i: usize = 0;
+                    while (it.next()) |kv| : (i += 1) {
+                        n[i] = kv.key_ptr.*;
+                        opts.appendAssumeCapacity(try optionText(a, kv.key_ptr.*, kv.value_ptr.*, budget));
+                    }
+                },
+                .array => |l| for (l.items, n) |x, *name| {
+                    name.* = x.string;
+                    opts.appendAssumeCapacity(try optionText(a, x.string, null, budget));
+                },
+                else => unreachable,
             }
         },
         .score => for (crit.?.array.items) |x| {
@@ -268,7 +288,7 @@ pub fn errorMessage(err: anyerror) ?[]const u8 {
         error.KevNoQuestions => "'questions' must be a non-empty object keyed by question id",
         error.KevBadQuestion => "each question must be an object",
         error.KevBadType => "question 'type' must be one of choice, score, noul",
-        error.KevChoiceCriteria => std.fmt.comptimePrint("choice 'criteria' must be an object with 1 to {d} options", .{MAX_OPTIONS}),
+        error.KevChoiceCriteria => std.fmt.comptimePrint("choice 'criteria' must be an object or a list of unique labels, 1 to {d} options", .{MAX_OPTIONS}),
         error.KevScoreCriteria => std.fmt.comptimePrint("score 'criteria' must be a list of 1 to {d} levels", .{MAX_OPTIONS}),
         error.KevNoulCriteria => "noul 'criteria' must be an object with false/true descriptions, or null",
         else => laya.errorMessage(err),
@@ -983,6 +1003,22 @@ test "kev: questions map noul, choice and score like kev.api.to_record" {
     try testing.expectEqualStrings("level: high", qs.qs[2].options[1]);
 }
 
+test "kev: choice criteria as a list of labels reads like an object without descriptions" {
+    // Laya takes both shapes on the same endpoint; a list is kev's {label: null}.
+    const a = testing.allocator;
+    var parsed = try laya.parseRequestJson(a,
+        \\{"l": {"type": "choice", "criteria": ["billing", "sales"]},
+        \\ "o": {"type": "choice", "criteria": {"billing": null, "sales": null}}}
+    );
+    defer parsed.deinit();
+    var qs = try Questions.init(a, parsed.value, 64);
+    defer qs.deinit(a);
+    for (0..2) |i| {
+        try testing.expectEqualStrings(qs.qs[1].options[i], qs.qs[0].options[i]);
+        try testing.expectEqualStrings(qs.qs[1].names.?[i], qs.qs[0].names.?[i]);
+    }
+}
+
 test "kev: malformed questions are named errors" {
     const a = testing.allocator;
     const cases = [_]struct { json: []const u8, err: anyerror }{
@@ -990,7 +1026,9 @@ test "kev: malformed questions are named errors" {
         .{ .json = "[]", .err = error.KevNoQuestions },
         .{ .json = "{\"q\": 1}", .err = error.KevBadQuestion },
         .{ .json = "{\"q\": {\"type\": \"rank\"}}", .err = error.KevBadType },
-        .{ .json = "{\"q\": {\"type\": \"choice\", \"criteria\": [\"a\"]}}", .err = error.KevChoiceCriteria },
+        .{ .json = "{\"q\": {\"type\": \"choice\", \"criteria\": [\"a\", 1]}}", .err = error.KevChoiceCriteria },
+        .{ .json = "{\"q\": {\"type\": \"choice\", \"criteria\": [\"a\", \"a\"]}}", .err = error.KevChoiceCriteria },
+        .{ .json = "{\"q\": {\"type\": \"choice\", \"criteria\": []}}", .err = error.KevChoiceCriteria },
         .{ .json = "{\"q\": {\"type\": \"choice\", \"criteria\": {}}}", .err = error.KevChoiceCriteria },
         .{ .json = "{\"q\": {\"type\": \"score\", \"criteria\": []}}", .err = error.KevScoreCriteria },
         .{ .json = "{\"q\": {\"type\": \"noul\", \"criteria\": [1]}}", .err = error.KevNoulCriteria },
@@ -1331,7 +1369,8 @@ test "kev: question parsing frees everything on every allocation failure" {
     var parsed = try laya.parseRequestJson(a,
         \\{"r": {"type": "choice", "instructions": {"q": "Which?", "l": [1, 2]}, "criteria": {"billing": "refunds", "sales": ["a", "b"], "x": null}},
         \\ "n": {"type": "noul", "instructions": "Refund?", "criteria": {"true": "money back", "false": ""}},
-        \\ "s": {"type": "score", "instructions": "How bad?", "criteria": ["low", {"level": "high"}, [1, 2]]}}
+        \\ "s": {"type": "score", "instructions": "How bad?", "criteria": ["low", {"level": "high"}, [1, 2]]},
+        \\ "l": {"type": "choice", "criteria": ["billing", "sales"]}}
     );
     defer parsed.deinit();
     // Refuse in-place resizes so every toOwnedSlice allocates and can fail.

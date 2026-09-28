@@ -89,8 +89,8 @@ echo "=== request validation (Kev's rules, named 400s) ==="
 expect_code "missing questions -> 400" 400 "{\"model\":\"$MODEL_ID\",\"state\":\"x\"}"
 expect_code "empty questions -> 400 (kev requires at least one)" 400 "{\"model\":\"$MODEL_ID\",\"state\":\"x\",\"questions\":{}}"
 expect_code "unknown question type -> 400" 400 "{\"model\":\"$MODEL_ID\",\"state\":\"x\",\"questions\":{\"q\":{\"type\":\"rank\"}}}"
-expect_code "choice criteria as a list -> 400 (kev takes an object)" 400 "{\"model\":\"$MODEL_ID\",\"state\":\"x\",\"questions\":{\"q\":{\"type\":\"choice\",\"criteria\":[\"a\",\"b\"]}}}"
-check "  ... and the message says what to send" "$(grep -c 'must be an object' "$TMP/err.json")" "1"
+expect_code "choice criteria with a repeated label -> 400" 400 "{\"model\":\"$MODEL_ID\",\"state\":\"x\",\"questions\":{\"q\":{\"type\":\"choice\",\"criteria\":[\"a\",\"a\"]}}}"
+check "  ... and the message says what to send" "$(grep -c 'list of unique labels' "$TMP/err.json")" "1"
 expect_code "score with no levels -> 400" 400 "{\"model\":\"$MODEL_ID\",\"state\":\"x\",\"questions\":{\"q\":{\"type\":\"score\",\"criteria\":[]}}}"
 expect_code "noul criteria as a list -> 400" 400 "{\"model\":\"$MODEL_ID\",\"state\":\"x\",\"questions\":{\"q\":{\"type\":\"noul\",\"criteria\":[1]}}}"
 expect_code "lone surrogate in the state -> 400" 400 "{\"model\":\"$MODEL_ID\",\"state\":\"a\\ud800b\",\"questions\":{\"q\":{\"type\":\"noul\"}}}"
@@ -163,6 +163,19 @@ print("same" if out == serial and serial[-1] == 400 and all(isinstance(s, dict) 
 EOF
 )"
 check "8 concurrent requests + 1 bad one: each answers as it does alone" "$CONC" "same"
+
+echo "=== choice criteria as a list (Laya's shape) ==="
+LIST="$(python3 - "$PORT" "$MODEL_ID" <<'EOF'
+import json, sys, urllib.request
+port, model = sys.argv[1], sys.argv[2]
+def ask(crit):
+    body = json.dumps({"model": model, "state": "Charged twice, refund please.",
+                       "questions": {"team": {"type": "choice", "instructions": "Which team?", "criteria": crit}}}).encode()
+    return json.load(urllib.request.urlopen(urllib.request.Request(f"http://localhost:{port}/v1/decisions", body, {"Content-Type": "application/json"}), timeout=120))["answers"]
+print("same" if ask(["billing", "sales", "tech"]) == ask({"billing": None, "sales": None, "tech": None}) else "differ")
+EOF
+)"
+check "a list of labels answers exactly like {label: null}" "$LIST" "same"
 
 echo "=== latency (median of 30, 1 question, warm) ==="
 LAT="$(python3 - "$PORT" "$MODEL_ID" <<'EOF'
