@@ -1991,6 +1991,6 @@ Symptom: wrong-typed or out-of-range config fields could cause illegal behavior 
 
 Cause: bare JSON union reads and unchecked integer narrowing or derived dimensions trusted checkpoint input.
 
-Fix: `parseConfigFromJson` uses checked readers and arithmetic; `jsonIs` preserves optional null defaults, and disabled floating caps explicitly accept null. Discovery checks the root type and metadata ranges before the full parser runs. Unknown vendor keys remain ignored; tensor shapes and other model-specific geometry need separate validation.
+Fix: `parseConfigFromJson` checks consumed values and arithmetic. `jsonField` treats optional nulls as absent; explicit disables such as `sliding_window:null`, negative BOS sentinels and guarded skips keep their semantics. Discovery checks root types and metadata ranges. Tensor shapes need separate validation.
 
-Guard: `parseConfigFromJson rejects invalid field types and ranges`; `config discovery tolerates invalid roots and oversized metadata`.
+Guard: `parseConfigFromJson rejects invalid field types and ranges`, `preserves optional nulls and skipped fields`, `accepts real checkpoint configs`; `config discovery tolerates invalid roots and oversized metadata`.
