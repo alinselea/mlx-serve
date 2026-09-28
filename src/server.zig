@@ -7078,7 +7078,7 @@ fn handleGen(allocator: std.mem.Allocator, stream: *Conn, body: []const u8, lm: 
     var req = scheduler_mod.GenRequest{ .ctx = &job, .run = genJobRun, .model = lm, .decision = route == .decisions };
     if (decision) |*d| req.merge = .{
         .run_many = genJobRunMany,
-        .weight = @max(1, d.questions.qs.len),
+        .weight = @max(1, d.count()),
         .window_us = lm.decision_engine.?.batch_window_us,
     };
     scheduler.runGeneration(&req) catch |err| switch (err) {

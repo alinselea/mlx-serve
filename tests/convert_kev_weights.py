@@ -3,7 +3,7 @@
 
 USER-RUN, from a kev checkout with its serve extras (mlx-lm, torch, huggingface_hub):
     cd ~/kev && uv run --extra serve python /path/to/mlx-serve/tests/convert_kev_weights.py \\
-        jaredpalmer/kev-4b --out ~/.mlx-serve/models/jaredpalmer/Kev-4B-MLX-Serve
+        jaredpalmer/kev-4b --out ~/.mlx-serve/models/jaredpalmer/Kev-4B-MLX-Serve-8bit --q-bits 8
 Produces the dir `src/kev.zig` loads:
     <out>/config.json, model*.safetensors, tokenizer files   the base Qwen3.5 text model with the LoRA MERGED
     <out>/kev_head.safetensors   pointer head: q.weight [P,H], q.bias [P], k.weight [P,H], k.bias [P], f32
@@ -19,6 +19,9 @@ WHY EACH STEP EXISTS
 (c) ONLY WHAT THE SERVER NEEDS. The pack carries the head tensors, head_dim, the calibrated temperature, the five
     delimiter strings and {repo, revision, base, base_revision}. Nothing else from the checkpoint's metadata
     (training arguments, evaluation data, private paths) is copied.
+(d) QUANTIZED BY DEFAULT. `--q-bits 8` (the default) quantizes the merged trunk with mlx-lm's own quantizer
+    (affine, group 64), the layout mlx-serve's fast kernels read; `--q-bits 0` keeps bf16, the quality reference.
+    The head always stays f32.
 v1 supports LoRA checkpoints on the hybrid Qwen3.5 bases, the ones kev serves on MLX. Full-weight,
 option-isolation and trained-token-embedding checkpoints are refused by name.
 """
@@ -28,7 +31,7 @@ from pathlib import Path
 import mlx.core as mx
 import numpy as np
 import torch
-from mlx_lm.utils import load_config, load_model, save_config, save_model
+from mlx_lm.utils import load_config, load_model, quantize_model, save_config, save_model
 
 from kev.checkpoint import resolve_run
 from kev.mlx_model import merge_lora
@@ -64,6 +67,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run", help="kev run: a hub id (jaredpalmer/kev-4b) or a local run dir")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--q-bits", type=int, default=8, choices=(0, 4, 8), help="trunk quantization (0 = bf16)")
+    ap.add_argument("--q-group-size", type=int, default=64)
     args = ap.parse_args()
 
     run_dir = Path(resolve_run(args.run))   # kev's own metadata reader is not used: it does not pin weights_only
@@ -81,10 +86,13 @@ def main():
     if head["q.weight"].shape[1] != hidden:
         sys.exit(f"head input width {head['q.weight'].shape[1]} != backbone hidden size {hidden}")
 
+    cfg = dict(base_cfg)
+    if args.q_bits:
+        lm, cfg = quantize_model(lm, cfg, args.q_group_size, args.q_bits)
     out = Path(args.out).expanduser()
     out.mkdir(parents=True, exist_ok=True)
     save_model(out, lm, donate_model=True)
-    save_config(base_cfg, out / "config.json")
+    save_config(cfg, out / "config.json")
     for name in TOKENIZER_FILES:
         src = run_dir / name if (run_dir / name).exists() else base_dir / name
         if src.exists():
@@ -97,7 +105,8 @@ def main():
                    "source": {"repo": None if os.path.isdir(args.run) else args.run.partition("@")[0],
                               "revision": None if os.path.isdir(args.run) else run_dir.name,
                               "base": meta["base"], "base_revision": meta.get("base_revision")}}, f, indent=1)
-    print(f"merged {merged} LoRA tensors; head_dim {head_dim}, temperature {temperature:.6f}; wrote {out}")
+    print(f"merged {merged} LoRA tensors; trunk {'bf16' if not args.q_bits else f'{args.q_bits}-bit g{args.q_group_size}'}; "
+          f"head_dim {head_dim}, temperature {temperature:.6f}; wrote {out}")
 
 
 if __name__ == "__main__":

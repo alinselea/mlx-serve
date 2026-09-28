@@ -226,6 +226,9 @@ fn parseQuestion(a: std.mem.Allocator, id: []const u8, v: std.json.Value, budget
     var instr: std.ArrayList(u8) = .empty;
     errdefer instr.deinit(a);
     if (v.object.get("instructions")) |ins| try render(a, &instr, ins, 0, budget);
+    // A lone \ud800-style escape survives parsing as WTF-8, which the tokenizer cannot read.
+    if (!std.unicode.utf8ValidateSlice(instr.items)) return error.LoneSurrogate;
+    for (opts.items) |o| if (!std.unicode.utf8ValidateSlice(o)) return error.LoneSurrogate;
     const options = try opts.toOwnedSlice(a);
     errdefer {
         for (options) |o| a.free(o);
@@ -255,6 +258,19 @@ pub fn escapeMarkers(a: std.mem.Allocator, text: []const u8) ![]u8 {
         i += 1;
     }
     return out.toOwnedSlice(a);
+}
+
+/// 400 text for a request Kev cannot read; errors shared with Laya's parser fall through to its messages.
+pub fn errorMessage(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.KevNoQuestions => "'questions' must be a non-empty object keyed by question id",
+        error.KevBadQuestion => "each question must be an object",
+        error.KevBadType => "question 'type' must be one of choice, score, noul",
+        error.KevChoiceCriteria => std.fmt.comptimePrint("choice 'criteria' must be an object with 1 to {d} options", .{MAX_OPTIONS}),
+        error.KevScoreCriteria => std.fmt.comptimePrint("score 'criteria' must be a list of 1 to {d} levels", .{MAX_OPTIONS}),
+        error.KevNoulCriteria => "noul 'criteria' must be an object with false/true descriptions, or null",
+        else => laya.errorMessage(err),
+    };
 }
 
 // ── Answers (kev.api.to_answers) ──
@@ -482,6 +498,7 @@ pub const Engine = struct {
         defer text.deinit(a);
         var budget: Budget = .{};
         try render(a, &text, state, 0, &budget);
+        if (!std.unicode.utf8ValidateSlice(text.items)) return error.LoneSurrogate;
         var input_tokens: usize = 0;
         const probs = try self.score(a, text.items, questions.qs, &input_tokens);
         defer {
@@ -1122,4 +1139,13 @@ test "kev: question parsing frees everything on every allocation failure" {
     // Refuse in-place resizes so every toOwnedSlice allocates and can fail.
     var no_remap = std.testing.FailingAllocator.init(a, .{ .resize_fail_index = 0 });
     try testing.checkAllAllocationFailures(no_remap.allocator(), parseQuestionsOnce, .{parsed.value});
+}
+
+test "kev: a lone surrogate in text the model reads is refused by name" {
+    const a = testing.allocator;
+    var parsed = try laya.parseRequestJson(a, "{\"q\": {\"type\": \"noul\", \"instructions\": \"bad \\ud800 text\"}}");
+    defer parsed.deinit();
+    try testing.expectError(error.LoneSurrogate, Questions.init(a, parsed.value, 64));
+    try testing.expect(errorMessage(error.LoneSurrogate) != null);
+    try testing.expect(errorMessage(error.KevChoiceCriteria) != null);
 }
