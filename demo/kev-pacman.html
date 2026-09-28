@@ -303,14 +303,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function loop() {
   looping = true;
-  while (running && !G.over) {
-    const t0 = performance.now(), board = G;
-    try { await tick(); }
-    catch (e) { if (board === G) { say(e.message, true); running = false; break; } }
-    draw(); panels();
-    await sleep(Math.max(0, +$("speed").value - (performance.now() - t0)));
+  try {
+    while (running && !G.over) {
+      const t0 = performance.now(), board = G;
+      try { await tick(); draw(); panels(); }
+      catch (e) { if (board === G) { say(e.message, true); running = false; break; } }
+      await sleep(Math.max(0, +$("speed").value - (performance.now() - t0)));
+    }
+  } finally {
+    looping = false; running = false; $("go").textContent = "Start";
   }
-  looping = false; running = false; $("go").textContent = "Start";
 }
 
 // Server and URL text is shown as text, never parsed as HTML.
