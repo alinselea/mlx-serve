@@ -90,6 +90,8 @@ Sampling defaults for omitted fields: body > launch flags > model `generation_co
 
 ## Testing — TDD is mandatory
 
+Linux llama KV flags must reach both startup and headless loads; validate actual context K/V types with `tests/test_llama_kv_quant.py`, not just the CLI banner.
+
 Order: (1) failing test FIRST, for the right reason; (2) minimum code to green; (3) full suite (`zig build test` all steps, 0 fail + `bash app/test.sh`/`swift build` + relevant `tests/*.sh`); (4) refactor. A live curl is a sanity check, NOT a test.
 
 Feature = unit test that fails without it (+ integration script if HTTP-observable). Bug fix = regression test red→fix→green, red-on-revert. Cross-arch = cover every touched arch. Refactor = characterization test first. UI/build scripts = factor a pure helper and test that.
