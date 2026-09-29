@@ -96,8 +96,11 @@ fn replThreadMain(allocator: std.mem.Allocator, io: std.Io, port: u16) void {
 fn printUsage(io: std.Io) void {
     var stdout_buf: [4096]u8 = undefined;
     var stdout_w = std.Io.File.stdout().writer(io, &stdout_buf);
+    stdout_w.interface.writeAll(if (build_cfg.gguf_only)
+        "mlx-serve — GGUF inference server (llama.cpp + Vulkan), for Linux\n"
+    else
+        "mlx-serve — MLX inference server for Apple Silicon\n") catch {};
     stdout_w.interface.writeAll(
-        \\mlx-serve — MLX inference server for Apple Silicon
         \\
         \\Usage: mlx-serve <command> [options]
         \\       mlx-serve [options]
