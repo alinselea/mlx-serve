@@ -1,54 +1,53 @@
+const build_cfg = @import("build_cfg.zig");
 const std = @import("std");
 const build_options = @import("build_options");
 // pub: lib/mlx-serve-gguf and lib/sushi reach these through their host root.
-pub const mlx = @import("mlx.zig");
+pub const mlx = if (build_cfg.mlx_enabled) @import("mlx.zig") else @import("mlx_stub.zig");
 pub const io_util = @import("io_util.zig");
-const mlx_gguf = @import("arch/mlx_gguf.zig");
+const mlx_gguf = if (build_cfg.mlx_enabled) @import("arch/mlx_gguf.zig") else @import("mlx_gguf_stub.zig");
 const model_mod = @import("model.zig");
 const tokenizer_mod = @import("tokenizer.zig");
-const transformer_mod = @import("transformer.zig");
+const transformer_mod = if (build_cfg.mlx_enabled) @import("transformer.zig") else @import("transformer_stub.zig");
 const round_cost_mod = @import("round_cost.zig");
-const generate_mod = @import("generate.zig");
+const generate_mod = if (build_cfg.mlx_enabled) @import("generate.zig") else @import("generate_stub.zig");
 const mtp_acceptance = @import("mtp_acceptance.zig");
 const model_discovery = @import("model_discovery.zig");
 const gguf_meta = @import("gguf_meta.zig");
 const model_registry_mod = @import("model_registry.zig");
-const drafter_mod = @import("drafter.zig");
-const mtp_graft = @import("mtp_graft.zig");
-const mtp_mod = @import("mtp.zig");
+const drafter_mod = if (build_cfg.mlx_enabled) @import("drafter.zig") else @import("spec_stub.zig");
+const mtp_graft = if (build_cfg.mlx_enabled) @import("mtp_graft.zig") else @import("spec_stub.zig");
+const mtp_mod = if (build_cfg.mlx_enabled) @import("mtp.zig") else @import("spec_stub.zig");
 const chat_mod = @import("chat.zig");
 const server_mod = @import("server.zig");
 const scheduler_mod = @import("scheduler.zig");
 const model_settings_mod = @import("model_settings.zig");
-const vision_mod = @import("vision.zig");
-const ds4_arch = if (build_options.macos_engines) @import("arch/ds4.zig") else @import("arch/ds4_stub.zig");
-const llama_arch = if (build_options.macos_engines) @import("arch/llama.zig") else @import("arch/llama_stub.zig");
-const gen_mod = @import("gen.zig");
+const vision_mod = if (build_cfg.mlx_enabled) @import("vision.zig") else @import("vision_stub.zig");
+const ds4_arch = if (build_cfg.ds4_enabled) @import("arch/ds4.zig") else @import("arch/ds4_stub.zig");
+const llama_arch = if (build_cfg.llama_enabled) @import("arch/llama.zig") else @import("arch/llama_stub.zig");
+const gen_mod = if (build_cfg.mlx_enabled) @import("gen.zig") else @import("gen_stub.zig");
 const cli_mod = @import("cli.zig");
 const launch_mod = @import("launch.zig");
 pub const log = @import("log.zig");
 const metrics_mod = @import("metrics.zig");
 const sleep_inhibit_mod = @import("sleep_inhibit.zig");
 const version_mod = @import("version.zig");
-const ane_mod = @import("ane.zig");
-const ple_gpu = @import("ple_gpu.zig");
+const ane_mod = if (build_cfg.mlx_enabled) @import("ane.zig") else @import("ane_stub.zig");
+const ple_gpu = if (build_cfg.mlx_enabled) @import("ple_gpu.zig") else @import("spec_stub.zig");
 
 pub const VERSION: []const u8 = build_options.version;
 
-// ggml runtime version (llama.cpp), linked into the macOS exe. Referenced only
+// ggml runtime version (llama.cpp), linked into desktop builds. Referenced only
 // by the `--version` report, which runs before any engine init.
 extern "c" fn ggml_version() [*:0]const u8;
 extern "c" fn ggml_commit() [*:0]const u8;
 
-// The embedded llama.cpp engine only links on macOS builds (macos_engines);
-// elsewhere the stub engine replaces it, so the libllama symbols above are
-// not referenced and `--version` reports these placeholders instead.
+// iOS uses the stub engine and has no ggml runtime symbols.
 fn ggmlEngineVersion() []const u8 {
-    if (comptime !build_options.macos_engines) return "unavailable (no embedded llama.cpp)";
+    if (comptime !build_cfg.llama_enabled) return "unavailable (no embedded llama.cpp)";
     return std.mem.span(ggml_version());
 }
 fn ggmlEngineCommit() []const u8 {
-    if (comptime !build_options.macos_engines) return "";
+    if (comptime !build_cfg.llama_enabled) return "";
     return std.mem.span(ggml_commit());
 }
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -444,8 +443,8 @@ pub fn main(init: std.process.Init) !void {
     server_mod.applyMlxCacheLimit();
     server_mod.applyGpuCeilingEnv();
     // Resolve lazily-cached env reads on the main thread before other threads exist.
-    @import("transformer.zig").warmQsaEnvCaches();
-    @import("prefix_cache.zig").warmEnvCaches();
+    transformer_mod.warmQsaEnvCaches();
+    (if (build_cfg.mlx_enabled) @import("prefix_cache.zig") else @import("mlx_cache_stub.zig")).warmEnvCaches();
 
     // mlx-c's default handler exits the process; latch MLX failures instead (#353).
     mlx.installErrorHandler();
@@ -603,14 +602,14 @@ pub fn main(init: std.process.Init) !void {
             _ = mlx.mlx_version(&mlx_ver);
             const info = version_mod.Info{
                 .app = VERSION,
-                .mlx = std.mem.span(mlx.mlx_string_data(mlx_ver)),
-                .mlx_c = build_options.mlx_c_version,
+                .mlx = if (build_cfg.mlx_enabled) std.mem.span(mlx.mlx_string_data(mlx_ver)) else "unavailable",
+                .mlx_c = if (build_cfg.mlx_enabled) build_options.mlx_c_version else "unavailable",
                 .nax = transformer_mod.naxStatus(),
                 .ggml = ggmlEngineVersion(),
                 .ggml_commit = ggmlEngineCommit(),
                 .llama_tag = build_options.llama_tag,
                 .gguf_format = GGUF_FORMAT_VERSION,
-                .ds4_commit = build_options.ds4_commit,
+                .ds4_commit = if (build_cfg.ds4_enabled) build_options.ds4_commit else "unavailable",
             };
             var ver_buf: [512]u8 = undefined;
             var ver_w = std.Io.File.stdout().writer(io, &ver_buf);
@@ -1281,6 +1280,8 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    if (comptime !build_cfg.mlx_enabled) return error.MlxUnavailable;
+
     // Parse config — heap allocate so the LoadedModel can take ownership
     // (Plan 05). Free path in serve_mode = registry.deinit; offline mode =
     // explicit defer on `config_storage`.
@@ -1826,6 +1827,7 @@ fn runGenServe(
     max_resident_mem_explicit: bool,
     idle_evict_secs: ?u32,
 ) !void {
+    if (comptime !build_cfg.media_gen_enabled) return error.MlxUnavailable;
     log.info("mlx-serve {s} (native {s} engine)\n", .{ VERSION, @tagName(modality) });
     log.info("[args] model: {s}\n", .{model_dir});
     log.info("[args] serve: {s}:{d}\n", .{ host, port });
