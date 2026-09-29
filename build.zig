@@ -444,6 +444,21 @@ fn addLinuxServe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     const check = b.addExecutable(.{ .name = "mlx-serve-check", .root_module = check_mod });
     b.step("check", "Type-check the server without emitting a binary").dependOn(&check.step);
 
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("src/linux_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    for (mod.import_table.keys(), mod.import_table.values()) |name, module| test_mod.addImport(name, module);
+    test_mod.linkLibrary(jinja);
+    const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this substring");
+    const unit_tests = b.addTest(.{
+        .root_module = test_mod,
+        .filters = if (test_filter) |f| &.{f} else &.{},
+    });
+    b.step("test", "Run Linux unit tests").dependOn(&b.addRunArtifact(unit_tests).step);
+
     const exe = b.addExecutable(.{
         .name = "mlx-serve",
         .root_module = mod,
