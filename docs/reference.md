@@ -94,6 +94,16 @@ A `.gguf` model path (or a directory containing one) bypasses the MLX safetensor
 
 GGUF dirs are also **discoverable + cold-loadable** (issue #59 — pulled GGUF repos ship NO config.json): discovery and `probeModelDir` classify a dir holding a non-mmproj `.gguf` as `model_type "gguf"` — GGUF presence WINS over a stray config.json, mirroring `--model` routing — with `bytes_on_disk` = the file `resolveGgufFile` will pick (alphabetically-smallest LLM quant), not the sum of every quant. On demand, `ensureLoaded` routes through the same engine arms as startup: `preloadCpuState` builds a stub CpuState (`buildGgufStubCpuState`; ctx from `LoadParams.ctx_size`, else llama 8192 / ds4 clamp) and sets `LoadRequest.{ds4,llama}_path`. The GGUF path helpers (`isGgufModelPath`/`resolveGgufFile`) live in `model_discovery.zig`, shared by main.zig and the scheduler. Guard: the headless section of `tests/test_llama_gguf.sh` (discover → cold-load → chat → unload → reload) + the GGUF discovery/probe/resolve tests in `model_discovery.zig`.
 
+### Linux build
+
+`-Dgguf-only` defaults to true for non-macOS targets. On Linux this replaces the
+previous default MLX/Vulkan graph with embedded llama.cpp and MLX/media stubs.
+Use `-Dgguf-only=false` to retain the staged Linux MLX backend. Build with
+`zig build -Dgguf-only -Doptimize=ReleaseFast`; `zig build check -Dgguf-only`
+type-checks the server without staged libllama, and `zig build test -Dgguf-only`
+runs LAN, stub and shared configuration tests. Both need system libwebp headers;
+the executable also needs libllama staged by `scripts/fetch-llama.sh`.
+
 ### MLX GGUF engine (`lib/mlx-serve-gguf`)
 
 A separate repo (submodule at `lib/mlx-serve-gguf`, its own README + tests + `zig build bench`) that serves GGUF files AS IS on the regular MLX path, so they get the native forward (`qwen3_5`, `qwen3_5_moe`, `gemma4`), batching, prefix cache, PLD and scheduler instead of llama.cpp. It reaches MLX through one import, `mlx_host`, which `build.zig` (`addGgufModule`) points at mlx-serve's own root module (so `main.zig`/`tests.zig`/`ios_lib.zig` expose `pub const mlx`): same bindings, same error latch.
@@ -358,7 +368,7 @@ Generic GGUF models (everything except DSV4-Flash) are served by the embedded **
 - Build: `build.zig` `addLlamaLib` adds `lib/llama/include`, links `libllama` (`use_pkg_config = .no` so a Homebrew `llama.cpp` install can't hijack the link), compiles the shim, and adds a dev rpath. Bundling: `release.yml` / `app/build.sh` copy `libllama.dylib` into the app `Frameworks/` (and the CLI tarball `lib/`), rewrite `@rpath/libllama.dylib` → `@executable_path/...`, and sign it through the existing dylib loop — no new executable, so notarization is unchanged.
 - Chat templating reuses mlx-serve's Jinja engine: the GGUF's embedded template is adopted into the stub `ChatConfig.chat_template` at load (`Scheduler.doLoadLlamaOnInferenceThread`), then `chat.encodeChatViaLlama` renders via `renderChatTemplate` (which supplies the tool-synthesis fallback) and tokenizes through libllama (`add_special=false`, the template owns BOS).
 - Scope (v1, like ds4): serial (`max_concurrent=1`), no PLD/drafter/hot-switch (those are MLX-specific). Tested by `tests/test_llama_gguf.sh` (gated on `LLAMA_GGUF_MODEL`).
-- Linux `--kv-quant off|4|8` sets both llama K/V caches to F16 (default), Q4_0 or Q8_0. `--llama-kv-quant` remains an alias; the last flag wins. Applies to startup and headless/on-demand model loads. The request-body `kv_quant` field does not override llama's load-time setting; restart with the desired CLI setting. Quantized V requires flash attention, which the shim enables automatically; the GPU/model must support that combination. `tests/test_llama_kv_quant.py` checks actual context types, generation and KV allocation size (`LLAMA_GGUF_MODEL` required).
+- In a GGUF-only build, `--kv-quant off|4|8` sets both llama K/V caches to F16 (default), Q4_0 or Q8_0. `--llama-kv-quant` remains an alias; the last flag wins. Applies to startup and headless/on-demand model loads. The request-body `kv_quant` field does not override llama's load-time setting; restart with the desired CLI setting. Quantized V requires flash attention, which the shim enables automatically; the GPU/model must support that combination. `tests/test_llama_kv_quant.py` checks actual context types, generation and KV allocation size (`LLAMA_GGUF_MODEL` required).
 
 ## Sandbox agent CLI sessions (pi / hermes inside the guest)
 

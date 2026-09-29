@@ -277,7 +277,7 @@ fn printUsage(io: std.Io) void {
         \\                        windowing costs acceptance on stock Qwen heads).
         \\
     ) catch {};
-    stdout_w.interface.writeAll(if (builtin.os.tag == .linux)
+    stdout_w.interface.writeAll(if (build_cfg.gguf_only)
         \\  --kv-quant <mode>   llama.cpp KV cache: off (F16, default), 4 (Q4_0),
         \\                        8 (Q8_0). Quantized KV enables flash attention.
         \\                        Load-time only; the body field does not override it.
@@ -921,7 +921,7 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (llama_arch.LlamaKvQuant.fromString(args[i])) |q| {
                 server_mod.llama_kv_quant = q;
-                if (builtin.os.tag == .linux and build_cfg.gguf_only)
+                if (build_cfg.gguf_only)
                     kv_quant_config = if (q == .off) transformer_mod.KVQuantConfig.dense else transformer_mod.KVQuantConfig.affine(if (q == .q4) 4 else 8);
             } else {
                 log.err("--llama-kv-quant: expected off|q8|q4 (or 8/4), got '{s}'\n", .{args[i]});
@@ -989,7 +989,7 @@ pub fn main(init: std.process.Init) !void {
                 log.err("--kv-quant: expected one of {{off, 4, 8}}; got '{s}'\n", .{args[i]});
                 std.process.exit(1);
             }
-            if (builtin.os.tag == .linux)
+            if (build_cfg.gguf_only)
                 server_mod.llama_kv_quant = llama_arch.LlamaKvQuant.fromString(kv_quant_config.wireName()).?;
         } else if (std.mem.eql(u8, args[i], "--engine") and i + 1 < args.len) {
             i += 1;
@@ -1255,7 +1255,7 @@ pub fn main(init: std.process.Init) !void {
             sleep_inhibit_mod.isEnabled(),
         });
     }
-    if (builtin.os.tag == .linux) {
+    if (build_cfg.gguf_only) {
         log.info("[args] llama KV: {s} (load-time)\n", .{server_mod.llama_kv_quant.label()});
     } else switch (kv_quant_config.scheme) {
         .off => log.info("[args] kv-quant: off\n", .{}),
@@ -2017,8 +2017,8 @@ fn runHeadlessServe(
         .warmup_eager = false,
         .draft_block_size = 0,
         .kv_quant_config = kv_quant_config,
-        .llama_kv_type_k = if (builtin.os.tag == .linux) server_mod.llama_kv_quant.ggmlType() else 0,
-        .llama_kv_type_v = if (builtin.os.tag == .linux) server_mod.llama_kv_quant.ggmlType() else 0,
+        .llama_kv_type_k = if (build_cfg.gguf_only) server_mod.llama_kv_quant.ggmlType() else 0,
+        .llama_kv_type_v = if (build_cfg.gguf_only) server_mod.llama_kv_quant.ggmlType() else 0,
         .mtp_head_kv_quant = transformer_mod.Transformer.mtp_head_kv_quant_flag,
         // Seed the scheduler's prefix-cache config from the server globals so
         // on-demand (headless/discover-mode) loads get the SAME hot prefix
@@ -2521,7 +2521,7 @@ fn runLlamaServe(
         .warmup_eager = false,
         .draft_block_size = 0,
         .draft_block_size_explicit = false,
-        .kv_quant_config = if (builtin.os.tag == .linux) switch (server_mod.llama_kv_quant) {
+        .kv_quant_config = if (build_cfg.gguf_only) switch (server_mod.llama_kv_quant) {
             .off => transformer_mod.KVQuantConfig.dense,
             .q4 => transformer_mod.KVQuantConfig.affine(4),
             .q8 => transformer_mod.KVQuantConfig.affine(8),
