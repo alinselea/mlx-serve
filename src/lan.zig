@@ -876,7 +876,6 @@ fn threadMain(l: *Lan) void {
     }
 }
 
-// David's mDNS sweep feeds main's existing resolve/fetch and failure policy.
 fn threadMainLinux(l: *Lan) void {
     var responder: mdns.Responder = undefined;
     var host_buf: [32]u8 = undefined;
