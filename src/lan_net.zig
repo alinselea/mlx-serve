@@ -1,4 +1,4 @@
-//! Linux UDP helpers for David's mDNS responder. TCP stays in lan.zig.
+//! Linux UDP multicast helpers for the mDNS transport. TCP stays in lan.zig.
 const std = @import("std");
 
 pub const Socket = i32;

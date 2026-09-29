@@ -1,4 +1,4 @@
-//! Linux mDNS responder/browser, adapted from David's testing/windows_linux.
+//! Daemon-free Linux mDNS responder and browser for LAN peer discovery.
 //! PTR/SRV/TXT/A discovery only; LAN policy and peer management stay in lan.zig.
 
 const std = @import("std");

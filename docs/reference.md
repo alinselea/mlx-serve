@@ -102,7 +102,7 @@ Use `-Dgguf-only=false` to retain the staged Linux MLX backend. Build with
 `zig build -Dgguf-only -Doptimize=ReleaseFast`; `zig build check -Dgguf-only`
 type-checks the server without staged libllama, and `zig build test -Dgguf-only`
 runs LAN, stub and shared configuration tests. Both need system libwebp headers;
-the executable also needs libllama staged by `scripts/fetch-llama.sh`.
+the executable also needs libllama staged by `scripts/build-llama-linux.sh`.
 
 ### MLX GGUF engine (`lib/mlx-serve-gguf`)
 
