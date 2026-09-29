@@ -51,6 +51,7 @@ test "gguf-only: shared multipart translation preserves data and rejects numeric
 
 test "gguf-only: media peak estimates take explicit backend inputs" {
     const media = @import("gen_common.zig");
+    try std.testing.expect(!(media.PeakBackend{}).adaln_precompute());
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();

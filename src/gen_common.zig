@@ -694,7 +694,7 @@ pub const LTX_GEMMA_REPO_DIR = "mlx-community/gemma-3-12b-it-4bit";
 pub const PeakBackend = struct {
     working_set: *const fn () u64 = noWorkingSet,
     tower_present: *const fn (std.Io, std.mem.Allocator, []const u8) bool = noTower,
-    adaln_precompute: *const fn () bool = adalnPrecomputeOn,
+    adaln_precompute: *const fn () bool = noAdalnPrecompute,
 
     fn noWorkingSet() u64 {
         return 0;
@@ -702,8 +702,7 @@ pub const PeakBackend = struct {
     fn noTower(_: std.Io, _: std.mem.Allocator, _: []const u8) bool {
         return false;
     }
-    fn adalnPrecomputeOn() bool {
-        const v = std.c.getenv("MINIMAX_H3_ADALN_PRECOMPUTE") orelse return true;
-        return !std.mem.eql(u8, std.mem.span(v), "0");
+    fn noAdalnPrecompute() bool {
+        return false;
     }
 };
