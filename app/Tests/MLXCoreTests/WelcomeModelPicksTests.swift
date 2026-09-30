@@ -19,27 +19,31 @@ final class WelcomeModelPicksTests: XCTestCase {
         XCTAssertEqual(picks.count, 2)
     }
 
-    /// A 32 GB Mac (usable ~27): Gemma 4 31B and Qwen 3.8 27B are the
-    /// biggest COMFORTABLE fits. The 8-bit Gemma and the 35B-A3B land tight
-    /// there, and the welcome leads with comfort — a tight fit is what fails
-    /// under real memory pressure.
-    func testThirtyTwoGBMacGetsGemma31BAndQwen27B() {
-        let picks = WelcomeModelPicks.forMemory(mac(total: 32, usable: 27))
-        XCTAssertEqual(picks.first { $0.category == "General" }?.pick.id, "gemma-4-31b")
-        XCTAssertEqual(picks.first { $0.category == "Coding & agents" }?.pick.id, "qwen38-27b")
-        XCTAssertEqual(picks.count, 2)
+    /// From 32 GB up the welcome lists ONE model — the starter pick, the same
+    /// one the sheet after it offers.
+    func testFrom32GBTheWelcomeListsOnlyTheStarterPick() {
+        let expected: [(UInt64, String)] = [
+            (32, "qwen38-27b"), (36, "qwen38-27b-6bit"), (48, "qwen38-27b-8bit"),
+            (64, "qwen38-27b-8bit"), (96, "qwen38-flash-next"), (256, "qwen38-flash-next"),
+        ]
+        for (total, id) in expected {
+            let memory = mac(total: total, usable: total * 3 / 4)
+            let picks = WelcomeModelPicks.forMemory(memory)
+            XCTAssertEqual(picks.map(\.pick.id), [id], "\(total) GB")
+            XCTAssertEqual(WelcomeModelPicks.recommendedId(in: picks, memory: memory), id)
+        }
     }
 
-    func testLargeMacGetsTheBiggestOfEachType() {
-        let picks = WelcomeModelPicks.forMemory(mac(total: 256, usable: 200))
-        XCTAssertEqual(picks.first { $0.category == "General" }?.pick.id, "gemma-4-26b-a4b-8bit")
-        XCTAssertEqual(picks.first { $0.category == "Coding & agents" }?.pick.id, "qwen36-35b-a3b")
-        XCTAssertNil(picks.first { $0.pick.id == "qwen38-flash-next" }, "Largest is a browser-only tier, not a welcome category")
-        XCTAssertEqual(picks.count, 2)
+    /// A starter pick the list doesn't carry (16 GB: Gemma E4B) marks row 0.
+    func testRecommendedMarkFallsBackToTheFirstRow() {
+        let memory = mac(total: 16, usable: 11)
+        let picks = WelcomeModelPicks.forMemory(memory)
+        XCTAssertNil(picks.first { $0.pick.id == "gemma-4-e4b" })
+        XCTAssertEqual(WelcomeModelPicks.recommendedId(in: picks, memory: memory), picks.first?.id)
     }
 
     func testEveryPickHasAOneLineStrength() {
-        for p in WelcomeModelPicks.forMemory(mac(total: 256, usable: 200)) {
+        for p in WelcomeModelPicks.forMemory(mac(total: 24, usable: 16)) + WelcomeModelPicks.forMemory(mac(total: 256, usable: 200)) {
             XCTAssertFalse(p.strength.isEmpty)
             XCTAssertFalse(p.strength.contains("\n"), "strength must be a single short line")
         }

@@ -31,9 +31,8 @@
 #   MTP_EXPECT_AUTO_PROFILE=g17_nax_q4_gs64 MTP_EXPECT_AUTO_DEPTH=8 \
 #     MTP_TEST_MODEL=<model-dir> ./tests/test_mtp_equivalence.sh
 #
-# MoE trunks (35B-A3B, qwen4_exp) keep MTP default-OFF per request; set
-# MTP_FORCE_ENABLE=1 to inject "enable_mtp":true into every request body so
-# engagement + acceptance-floor checks exercise the MoE head arm.
+# MTP_FORCE_ENABLE=1 injects "enable_mtp":true into every request body (a
+# no-op now that every loaded head, MoE included, drafts by default).
 
 set -u
 source "$(dirname "$0")/_lib_models.sh"

@@ -13,29 +13,42 @@
   | LFM2.5 2.6B | +3% | +2% | +2% | +4% |
   | Spark-X2.5 4B 4-bit | +10% | · | · | · |
 
-- **Decoding streams keep moving through another request's prefill.** `--prefill-decode-share` gives decoders a share of wall time while a long prompt prefills, instead of freezing them for seconds on a 32k prompt (#568).
+- **Decoding streams keep moving through another request's prefill.** `--prefill-decode-share` gives decoders a share of wall time while a long prompt prefills, instead of freezing them for seconds on a 32k prompt (#568). Thanks @STRML.
 - **Qwen3.8 Flash Next MTP rounds on every chip.** Verify widths of 2 to 8 rows take the fused MoE rows kernel on all Apple Silicon, not only Ultra chips: on an M4 Max a 2-row verify forward drops from 26.9 to 23.5 ms and MTP decode gains 5-8% (code 101.7 -> 109.2 tok/s, greedy chat 83.6 -> 90.4).
-- **Qwen3.8 Flash Next after long prompts.** Decode past 32k is about 12% faster with the default bf16 KV, concurrent streams share the fused sparse-attention kernel, a long agent session stays in the hot cache instead of re-prefilling every turn, and MTP rounds draft the next chain before the host read. `--ple-gpu` (or the app toggle) runs the n-gram gather on the GPU, prefill 2-4% faster and decode +15% at 128k, but it's off by default now since it wants the whole table resident (#555, #539, #545, #554, #556, #575, #580, #584).
-- **Nemotron-H prefill is 9x faster.** The Mamba2 step runs fused over the whole prompt chunk (#574).
+- **Qwen3.8 Flash Next after long prompts.** Decode past 32k is about 12% faster with the default bf16 KV, concurrent streams share the fused sparse-attention kernel, a long agent session stays in the hot cache instead of re-prefilling every turn, and MTP rounds draft the next chain before the host read. `--ple-gpu` (or the app toggle) runs the n-gram gather on the GPU, prefill 2-4% faster and decode +15% at 128k, but it's off by default now since it wants the whole table resident (#555, #539, #545, #554, #556, #575, #580, #584). Thanks @STRML and @cowboycoderhq.
+- **Nemotron-H prefill is 9x faster.** The Mamba2 step runs fused over the whole prompt chunk (#574). Thanks @sbusso.
 - **A drafter per model, and Check for Updates.** Every model gets a drafter socket in the app, a pack's own `drafter/` loads with it, and 27B 6-bit and 8-bit packs get the exact DFlash tree too. My Models can check every model against Hugging Face and asks before replacing files (#590).
-- **Qwen-Image-2.1 instruction editing.** One checkpoint serves text-to-image and `mode:"edit"` with an image plus up to 10 references (#512).
-- **Console in Simplified Chinese with a light theme**, and the app's alerts and hints are translated (#487, #485, #463).
+- **Qwen-Image-2.1 instruction editing.** One checkpoint serves text-to-image and `mode:"edit"` with an image plus up to 10 references (#512). Thanks @codysk.
+- **Console in Simplified Chinese with a light theme**, and the app's alerts and hints are translated (#487, #485, #463). Thanks @LXD-8.
+- **Sushi packs and GGUF join the model lineup.** Qwen3.8 Flash Next packs quantized with Sushi's EXL3 format now serve directly; a GGUF checkpoint can optionally run on the same fast MLX path instead of a slower fallback engine (Settings > Engines). MTP drafting is on by default for every model with a head, MoE included.
+- **Bonsai 2 gets an optional lossy speed boost.** A new "Int8 prefill" setting speeds up prompt processing on 2-bit Bonsai 2 packs at a small accuracy cost (off by default), and verification on M5 Macs now runs on the tensor unit too (#619, #615). Thanks @h9q2cyxvgm-ui.
+- **Kev joins Laya on `/v1/decisions`**, the typed-decision endpoint for fast yes/no and multiple-choice style answers (#603). Thanks @alinselea.
+- **Recommended models refreshed:** MiMo 9B replaces Qwen 3.5 9B as the small pick, Qwen 3.6 27B is retired in favor of 3.8, and tier-list pages get one-click Run buttons (#577). Thanks @Fe2-O3.
+
+### Fixes
+- Model config files with the wrong field type or an out-of-range value are rejected with a clear error instead of loading a broken model (#608). Thanks @alinselea.
+- Prompt-lookup drafting (when the reply quotes the prompt back) no longer gets stuck repeating itself under typical acceptance — a long-standing cause of agent loops — and can now draft more tokens sooner after a shorter match (#614). Thanks @STRML.
+- The SSD cache tier's disk usage accounting matches what it actually stores (#601). Thanks @brandondyal.
+- A rare crash affecting older Apple Silicon Macs (M1/M2) during verification is fixed.
+- DFlash2 refuses to load a drafter with an unsupported quantized selector instead of misbehaving (#624). Thanks @brandondyal.
 
 ### Changes
-- A model can have a short alias (Model Settings, or `"alias"` in model-settings.json) that works wherever a request names a model, including Ollama, load and unload; `/v1/models` lists it beside the full id (#520).
+- A model can have a short alias (Model Settings, or `"alias"` in model-settings.json) that works wherever a request names a model, including Ollama, load and unload; `/v1/models` lists it beside the full id (#520, #612). Thanks @lborloz.
 - DFlash on Nemotron-H and dense Qwen3.5/3.8 emits exactly what serial decoding would, sampled requests included, on 4, 6 and 8-bit packs; seeded output with a DFlash drafter differs from earlier versions.
 - A seeded request gives the same text whether or not its prompt hit the prefix cache.
 - Qwen3.8-27B with a DFlash2 drafter verifies a tree of drafts each round instead of one path.
-- Nemotron-H 3.5 MoE checkpoints load (#559).
-- A second server refuses a port already in use instead of silently sharing it (#569).
-- A request that names a model by its path no longer gets another model's answer: a pack that failed to load returns its load error, and an unknown path returns 404 (#585).
-- Qwen3.8 Flash Next GGUFs route to the engine that can load them (#546).
-- `--mtp-greedy-tail` (or `"mtp_greedy_tail": true` for one model in model-settings.json) drafts only the first speculative token of a sampled request by sampling and the rest by argmax, which lets `--mtp-typical` accept longer runs; off by default.
+- Nemotron-H 3.5 MoE checkpoints load (#559). Thanks @sbusso.
+- Qwen-Image-2.1 packs whose text or vision embedding tables are quantized at a group size other than 64 load them at the right width instead of misreading them silently (#496).
+- Qwen-Image-2.1 packs that store their VAE in MLX layout, like `mlx-community/Qwen-Image-2.1-MLX-4bit`, generate and edit instead of failing at the first VAE conv (#496).
+- A second server refuses a port already in use instead of silently sharing it (#569). Thanks @sbusso.
+- A request that names a model by its path no longer gets another model's answer: a pack that failed to load returns its load error, and an unknown path returns 404 (#585, #607). Thanks @lborloz.
+- Qwen3.8 Flash Next GGUFs route to the engine that can load them (#546). Thanks @zeeshanhaque21.
+- `--mtp-greedy-tail` (or `"mtp_greedy_tail": true` for one model in model-settings.json) drafts only the first speculative token of a sampled request by sampling and the rest by argmax, which lets `--mtp-typical` accept longer runs; off by default (#602). Thanks @beamivalice.
 - Sidebar groups put chats, agent threads and terminals into named folders, and terminal sessions come back where you left them.
 - Agents launched from the app or `mlx-serve launch` get an `mlx-serve` skill for wiring code to the local APIs.
 - The tray's memory meter splits weights, KV cache and the rest, and the KV figure counts live requests too.
-- The Image pane is laid out like the other Create panes and keeps its draft across panes and relaunches; app text never drops below 12pt (#587, #572).
-- Models from `mlx-serve pull` register under their org/name id, and Ollama's `/api/show` reports thinking and vision on models that aren't loaded yet (#578, #579).
+- The Image pane is laid out like the other Create panes and keeps its draft across panes and relaunches; app text never drops below 12pt (#587, #572). Thanks @lojza3d and @LXD-8.
+- Models from `mlx-serve pull` register under their org/name id, and Ollama's `/api/show` reports thinking and vision on models that aren't loaded yet (#578, #579). Thanks @brandondyal.
 
 ## v26.9.6 — Every Image Seen - Laya Decisions - Steady Qwen3.8 Agents
 

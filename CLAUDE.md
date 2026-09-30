@@ -96,7 +96,7 @@ Feature = unit test that fails without it (+ integration script if HTTP-observab
 
 **Class bugs get class guards.** A live failure revealing a CLASS ships: the instance regression test; a corpus entry or universal invariant in `src/format_corpus_test.zig`; a rule here + story in `docs/gotchas/`.
 
-Hermetic suites: `zig build test -Dtest-filter="format corpus"`, `-Dtest-filter="tool traffic"`. Full matrix: `tests/CLAUDE.md`.
+Hermetic suites: `zig build test -Dtest-filter="format corpus"`, `-Dslow-tests -Dtest-filter="tool traffic"` (the replay is gated behind `-Dslow-tests`; the bare filter compiles and reports success without running it). Full suite: `zig build test -Dslow-tests`. Full matrix: `tests/CLAUDE.md`.
 
 ## Releases & benchmarking
 
@@ -105,7 +105,9 @@ Hermetic suites: `zig build test -Dtest-filter="format corpus"`, `-Dtest-filter=
 
 ## Conventions
 
-- Minimal DRY Zig; tests at the bottom of each source file; shell integration tests in `tests/`. Env levers only for paths with two arms worth comparing (lossy/tradeoff), never for an obvious win/fix.
+- KISS, DRY, YAGNI; simple is not easy: the elegant solution, minimal and fast code, no speculative abstractions or knobs.
+- Tests at the bottom of each source file; shell integration tests in `tests/`. Env levers only for paths with two arms worth comparing (lossy/tradeoff), never for an obvious win/fix.
+- Commit messages and PR bodies carry no `Co-Authored-By` or generated-by line.
 - Inference thread is the SOLE mlx caller (even frees) — media gen posts to `gen_queue`, never a gpu mutex. A long gen blocks chat decode (accepted).
 - Concurrent requests batch-decode on pure-attention archs + the qwen3_5 family incl. `qwen3_5_moe` and `qwen4_exp` (`configBatchesDecode`); `--max-concurrent` sizes the submit queue, not a decode gate. The per-slot verdict is a `BatchVerdict` reason: `[batched] slot serial: <reason>` once per slot, `/props` `batching`, `/v1/models` `batched_decode`, `mlx_serve:decode_serial_total{reason}`. Slots entering a batch mid-generation drain lazy pipeline state first.
 - A batched group past 1024 KV tokens attends PER SLOT (`perSlotBatchedAttn`: own view, no pad/stack/array mask; causal + quantized-KV kernels eligible). Below that, and on qwen4's QSA reads, the STACKED arm is capped by PADDING WASTE (`groupKeepCount`, `MAX_PAD_WASTE` 1.5, must stay < 2.0); longest slots fall to serial.
@@ -404,7 +406,7 @@ Kernels + numerics:
 - **`mx.quantize` packs DENSELY** (element i at bit `i*bits`, straddling words at 3/5/6 bits, #305): every hand-rolled unpack is tested at EVERY shipped width. Fused MoE kernels take 3-bit as a BYTE TRIPLE (`mlxserve_qpack`).
 - **An f32 SCALAR promotes every bf16 operand** — scalars via `scalarOf(v, dtype)`; a load-time const table in the wrong dtype widens every read (`constTableAs`); a chain that returns f32 by design makes the CALLER own the dtype (Mamba2's f32 SSM `y` too: cast back like mlx-lm's `ssm_attn`, else the whole residual runs f32); a quantized KV cache returns the dtype it was FED (bf16 scales widened f16 Bonsai under `--kv-quant`). Tell: `[dtype-trace] residual widened`.
 - **Every forward path carries a `[dtype-trace]`**; 1-D f16 tables narrowed at load (`narrowsLoadedF16`); a kernel's dtype and threadgroup BLOCK SIZE are ONE decision (`gdnBlockTFor`); signatures come from each input's ACTUAL dtype, <8-element arrays land in `constant`.
-- **A decode kernel can be LATENCY-bound** (qwen4 `hcReadFused`, `MLX_SERVE_HC_FUSED=0`): split-K + unrolled loads beat the op chain; redistributing a reduction into every threadgroup LOSES. Meter: `MLX_SERVE_DECODE_FWD_UBENCH`.
+- **A decode kernel can be LATENCY-bound** (qwen4 `hcReadFused`, `MLX_SERVE_HC_FUSED=0` / `MLX_SERVE_HC_UV=0`): split-K + unrolled loads beat the op chain; redistributing a reduction into every threadgroup LOSES. Meter: `MLX_SERVE_DECODE_FWD_UBENCH`.
 - **A decode kernel keyed on `batch*seq == 1` declines verify rows AND batched slots** — the grid carries the rows (`HC_FUSED_MAX_ROWS`/`GDN_FUSED_MAX_ROWS` 16).
 - **Prefill fusions take the chunk WIDTH as a scalar INPUT, never a template** (`hc_prefill.zig`, `MLX_SERVE_HC_PREFILL=0` / `MLX_SERVE_GDN_PREFILL_FUSED=0`); a per-token-varying template value is a fresh JIT per value. Every `metal_kernel` helper owes a `streamIsGpu` guard.
 - **GDN decode is three fused dispatches per layer** (`gdnPreworkFused`, `gdnNormGateFused`, `MLX_SERVE_GDN_DECODE_FUSED=0`); a greedy byte flip there is legit.

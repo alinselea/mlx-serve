@@ -103,6 +103,9 @@ test "real GGUF: stands in for a model dir, and --engine turns it off (set MLX_S
     const allocator = std.testing.allocator;
     const model_mod = @import("../model.zig");
     const tokenizer_mod = @import("../tokenizer.zig");
+    const prev = enabled;
+    defer enabled = prev;
+    enabled = true;
 
     var config = try model_mod.parseConfig(io, allocator, model);
     defer config.deinit(allocator);
@@ -121,6 +124,5 @@ test "real GGUF: stands in for a model dir, and --engine turns it off (set MLX_S
 
     try std.testing.expect(weightBytes(io, model).? > 1 << 20);
     enabled = false;
-    defer enabled = true;
     try std.testing.expectEqual(@as(?[]u8, null), servablePath(io, allocator, model));
 }

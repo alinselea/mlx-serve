@@ -305,6 +305,30 @@ extension RecommendedModelPick {
         activeParamsB: 27.0
     )
 
+    /// The same Qwen 3.8 27B at 6 and 8 bits: starter picks for 36 GB and
+    /// 48-64 GB Macs, not browser rows. `speed` is the 4-bit cell scaled by
+    /// weight bytes (decode is bandwidth-bound), not measured.
+    static let qwen38_27b6bit = qwen38_27bVariant(bits: 6, sizeGB: 27.0, speed: 23)
+    static let qwen38_27b8bit = qwen38_27bVariant(bits: 8, sizeGB: 35.0, speed: 18)
+
+    private static func qwen38_27bVariant(bits: Int, sizeGB: Double, speed: Int) -> RecommendedModelPick {
+        RecommendedModelPick(
+            id: "qwen38-27b-\(bits)bit",
+            name: "Qwen 3.8 27B \(bits)-bit",
+            tagline: "The strongest 27B, at higher precision",
+            blurb: "The same Qwen 3.8 27B, stored at \(bits) bits per weight instead of 4, so its answers stay closer to the original model's. Excellent at coding and multi-step agent work, reads images, and drafts several words at once for speed.",
+            repoId: "ddalcu/Qwen3.8-27B-MLX-Serve-\(bits)bit",
+            sizeGB: sizeGB,
+            family: .qwen,
+            intelligence: qwen38_27b.intelligence,
+            intelligenceIsEstimated: true,
+            speed: speed,
+            speedIsWithMtp: true,
+            contextTokens: qwen38_27b.contextTokens,
+            activeParamsB: qwen38_27b.activeParamsB
+        )
+    }
+
     /// prism-ml's Bonsai 2: Qwen3.8-27B requantized to ternary 2-bit behind
     /// Hadamard rotations (`prism_hadamard_qwen35`), 8.6 GB, so the 27B fits
     /// a 16 GB Mac. The repo ships no MTP head; the server grafts the 27B
@@ -479,20 +503,23 @@ extension RecommendedModelPick {
     ///
     /// | Physical RAM | Pick | Disk | RAM needed |
     /// |---|---|---|---|
-    /// | ≤ 16 GB | Gemma 4 E4B  |  4.8 GB |  5.8 GB |
-    /// | 16–32 GB| Gemma 4 12B  |  6.3 GB |  7.6 GB |
-    /// | 32–96 GB| Qwen 3.8 27B | 18.2 GB | 21.8 GB |
-    /// | 96 GB+  | Qwen 3.8 Flash-Next | 100 GB | 78 GB |
+    /// | ≤ 16 GB  | Gemma 4 E4B         |  4.8 GB |  5.8 GB |
+    /// | 16–32 GB | Gemma 4 12B         |  6.3 GB |  7.6 GB |
+    /// | 32–36 GB | Qwen 3.8 27B 4-bit  | 18.2 GB | 21.8 GB |
+    /// | 36–48 GB | Qwen 3.8 27B 6-bit  | 27.0 GB | 32.4 GB |
+    /// | 48–96 GB | Qwen 3.8 27B 8-bit  | 35.0 GB | 42.0 GB |
+    /// | 96 GB+   | Qwen 3.8 Flash-Next |  100 GB |   78 GB |
     ///
-    /// Bands are upper-INCLUSIVE: a 16 GB Mac gets E4B, not 12B. A boundary
-    /// machine is the one with the least headroom in its band, so it takes the
-    /// smaller side. The one exception is the top: Flash-Next is sized for a
-    /// 96 GB Mac, so 96 GB gets it.
+    /// 16 GB is upper-inclusive (a 16 GB Mac gets E4B); the bands above are
+    /// lower-inclusive, since 32, 36, 48 and 96 GB are the Macs each pick is
+    /// chosen for.
     static func starterPick(physicalMemoryBytes: UInt64) -> RecommendedModelPick {
         let gib = Double(physicalMemoryBytes) / bytesPerGiB
         if gib <= 16 { return .gemmaE4B }
-        if gib <= 32 { return .gemma12B }
-        if gib < 96 { return .qwen38_27b }
+        if gib < 32 { return .gemma12B }
+        if gib < 36 { return .qwen38_27b }
+        if gib < 48 { return .qwen38_27b6bit }
+        if gib < 96 { return .qwen38_27b8bit }
         return .qwen38FlashNext
     }
 }

@@ -1039,6 +1039,8 @@ struct LocalModel: Identifiable, Hashable {
     /// A defective row is listed so you can see and remove it, and is excluded
     /// from every picker.
     var defect: ModelDefect? = nil
+    /// The destination of a live transfer: listed, never picked.
+    var isDownloading: Bool = false
 
     var isSupportedArchitecture: Bool {
         supportedModelTypes.contains(modelType) || isMediaModelType(modelType)
@@ -1084,7 +1086,7 @@ struct LocalModel: Identifiable, Hashable {
     /// them (size + delete) and, since they ARE supported architectures,
     /// no longer flags them "Unsupported".
     var isChatPickable: Bool {
-        guard defect == nil else { return false }
+        guard defect == nil, !isDownloading else { return false }
         return kind == .base && isSupportedArchitecture && modelType != "bert" && !isMediaModelType(modelType)
     }
 

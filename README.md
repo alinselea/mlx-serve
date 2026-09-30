@@ -54,11 +54,10 @@ And because mlx-serve **speaks the Ollama API** (`/api/chat`, `/api/generate`, `
 
 ### Build from source
 
-Needs Xcode 26.2+ with the Metal Toolchain component (if `xcrun -sdk macosx metal --version` fails, run `xcodebuild -downloadComponent MetalToolchain`):
+Needs Xcode 26.2+ and [Homebrew](https://brew.sh). The script downloads the Metal Toolchain component and installs the `Brewfile` (cmake + webp) when they are missing:
 
 ```bash
 git clone --recurse-submodules https://github.com/ddalcu/mlx-serve && cd mlx-serve
-brew bundle install --file=Brewfile   # cmake + webp
 ./app/build.sh                        # app + server, ad-hoc signed
 ```
 

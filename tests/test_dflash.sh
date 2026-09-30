@@ -337,6 +337,8 @@ if echo "$BLINE" | grep -q ", capped ("; then
     ok "block capped for this machine's verify lanes ($BLINE)"
 elif echo "$BLINE" | grep -q "wide_verify_lane=true" && echo "$BLINE" | grep -q "block_size=$DECLARED_BLOCK,"; then
     ok "wide verify lane present, checkpoint block ($DECLARED_BLOCK) kept ($BLINE)"
+elif grep -q "draft trees engaged" "$LOG" && echo "$BLINE" | grep -q "block_size=$DECLARED_BLOCK,"; then
+    ok "draft tree cap keeps the checkpoint block ($DECLARED_BLOCK) ($BLINE)"
 else
     bad "block resolves against the machine's verify lanes (declared=$DECLARED_BLOCK)" "$BLINE"
 fi

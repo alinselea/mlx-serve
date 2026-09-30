@@ -218,33 +218,50 @@ final class RecommendedModelsTests: XCTestCase {
 
     // MARK: - Starter recommendation (RAM tiers)
 
-    /// The four bands, sampled in the middle of each.
+    /// Each band, sampled in the middle.
     func testStarterPickPerRamTier() {
         XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 8 * GiB).id, "gemma-4-e4b")
         XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 24 * GiB).id, "gemma-4-12b")
-        XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 64 * GiB).id, "qwen38-27b")
+        XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 32 * GiB).id, "qwen38-27b")
+        XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 36 * GiB).id, "qwen38-27b-6bit")
+        XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 64 * GiB).id, "qwen38-27b-8bit")
         XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 128 * GiB).id, "qwen38-flash-next")
     }
 
-    /// Bands are upper-inclusive, so a machine sitting exactly ON a boundary
-    /// takes the smaller side — it has the least headroom in its band.
+    /// Bands at 32, 36, 48 and 96 GB are LOWER-inclusive: those are real Mac
+    /// sizes, each the one its pick is chosen for. 16 GB stays upper-inclusive.
     func testStarterPickBoundariesAreExact() {
         XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 16 * GiB).id, "gemma-4-e4b")
         XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 17 * GiB).id, "gemma-4-12b")
-        XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 32 * GiB).id, "gemma-4-12b")
-        XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 33 * GiB).id, "qwen38-27b")
-        XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 95 * GiB).id, "qwen38-27b")
+        XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 31 * GiB).id, "gemma-4-12b")
+        XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 32 * GiB).id, "qwen38-27b")
+        XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 35 * GiB).id, "qwen38-27b")
+        XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 36 * GiB).id, "qwen38-27b-6bit")
+        XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 47 * GiB).id, "qwen38-27b-6bit")
+        XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 48 * GiB).id, "qwen38-27b-8bit")
+        XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 95 * GiB).id, "qwen38-27b-8bit")
         XCTAssertEqual(RecommendedModelPick.starterPick(physicalMemoryBytes: 96 * GiB).id, "qwen38-flash-next")
     }
 
     /// Every tier's pick actually runs on the SMALLEST Mac in its band — a
     /// recommendation the machine can't load is worse than no recommendation.
     func testEveryStarterTierFitsTheBottomOfItsBand() {
-        let bottoms: [UInt64] = [8 * GiB, 16 * GiB + 1, 32 * GiB + 1, 96 * GiB]
+        let bottoms: [UInt64] = [8 * GiB, 16 * GiB + 1, 32 * GiB, 36 * GiB, 48 * GiB, 96 * GiB]
         for bytes in bottoms {
             let pick = RecommendedModelPick.starterPick(physicalMemoryBytes: bytes)
             XCTAssertTrue(pick.meetsSystemRequirements(physicalMemoryBytes: bytes),
                           "\(pick.id) needs \(pick.approxRAMNeededGB) GB but was recommended at \(bytes / GiB) GB")
+        }
+    }
+
+    /// The 6/8-bit 27B packs are the same checkpoint as the 4-bit pick.
+    func testQwen27BQuantVariantsShareTheCheckpoint() {
+        for (pick, label) in [(RecommendedModelPick.qwen38_27b6bit, "6-bit"), (.qwen38_27b8bit, "8-bit")] {
+            XCTAssertEqual(pick.quantLabel, label)
+            XCTAssertEqual(pick.family, .qwen)
+            XCTAssertEqual(pick.intelligence, RecommendedModelPick.qwen38_27b.intelligence)
+            XCTAssertEqual(pick.activeParamsB, RecommendedModelPick.qwen38_27b.activeParamsB)
+            XCTAssertLessThanOrEqual(pick.speed, RecommendedModelPick.qwen38_27b.speed, "more bits per weight is never faster")
         }
     }
 
@@ -260,7 +277,7 @@ final class RecommendedModelsTests: XCTestCase {
     /// a GGUF pick (`ggufFilename` → the quant download path) because it must
     /// not assume otherwise, but nothing routes there today.
     func testNoStarterTierIsAGgufPick() {
-        for bytes: UInt64 in [8 * GiB, 16 * GiB, 32 * GiB, 128 * GiB] {
+        for bytes: UInt64 in [8 * GiB, 16 * GiB, 32 * GiB, 36 * GiB, 48 * GiB, 128 * GiB] {
             XCTAssertNil(RecommendedModelPick.starterPick(physicalMemoryBytes: bytes).ggufFilename)
         }
     }

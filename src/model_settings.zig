@@ -285,8 +285,8 @@ pub fn overrideFor(alloc: std.mem.Allocator, io: std.Io, model_path: []const u8)
     defer s.deinit();
     var o = s.lookup(alloc, model_path);
     if (o.drafter) |d| if (std.fs.path.isAbsolute(d)) {
-        const cfg = std.fs.path.join(alloc, &.{ d, "config.json" }) catch "";
-        defer alloc.free(cfg);
+        var cfg_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cfg = std.fmt.bufPrint(&cfg_buf, "{s}/config.json", .{d}) catch "";
         std.Io.Dir.cwd().access(io, cfg, .{}) catch {
             log.warn("[model-settings] {s}: drafter {s} has no config.json, using auto\n", .{ model_path, d });
             alloc.free(d);

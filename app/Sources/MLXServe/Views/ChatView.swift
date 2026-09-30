@@ -378,7 +378,6 @@ enum PasteFileKind: String, Equatable {
 struct ChatView: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var server: ServerManager
-    @Environment(\.dismissWindow) private var dismissWindow
     /// The two-column (chat) split's visibility.
     @State private var columnVisibility = NavigationSplitViewVisibility.automatic
     /// The three-column (Tasks / Agents) split's visibility. `.all` is the only
@@ -564,9 +563,10 @@ struct ChatView: View {
     /// are required and the order is load-bearing — a window with an attached
     /// sheet can't be closed, and dismissing to the composer underneath is the
     /// dead end this gate exists to replace.
+    /// Ends the sheet and leaves the window open to look around; it comes back
+    /// the next time the chat window opens with nothing to chat with.
     private func cancelGate() {
         gateCancelled = true
-        DispatchQueue.main.async { dismissWindow(id: "chat") }
     }
 }
 

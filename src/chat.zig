@@ -13720,6 +13720,7 @@ test "the streaming handlers route the think gate through a persistent ThinkScan
 }
 
 test "bench: streaming think gate scans BYTES, memoized vs fresh" {
+    if (!@import("build_options").slow_tests) return error.SkipZigTest;
     // The 5.10 acceptance bar is that per-token work is FLAT in buffer size,
     // not merely smaller. Wall clock is unavailable in a hermetic test under
     // Zig 0.17 (clocks live under std.Io) and would be noise anyway — bytes

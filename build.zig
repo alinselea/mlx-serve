@@ -122,6 +122,9 @@ pub fn build(b: *std.Build) void {
     // — `ios` keeps its own meaning (low-mem policy, sandboxing assumptions).
     build_options.addOption(bool, "macos_engines", true);
     build_options.addOption(bool, "gguf_only", gguf_only);
+    // The corpus replay and benchmark tests run tens of seconds in Debug (#639), so
+    // `zig build test` skips them and `zig build test -Dslow-tests` runs them.
+    build_options.addOption(bool, "slow_tests", b.option(bool, "slow-tests", "Also run the slow corpus-replay and benchmark tests") orelse false);
 
     // ds4 Metal kernel sources embedded via @embedFile and exposed as a
     // named module so src/arch/ds4.zig can import them with `@import("ds4_metal_sources")`
@@ -369,6 +372,9 @@ fn addLinuxServe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     build_options.addOption(bool, "ios", false);
     build_options.addOption(bool, "macos_engines", false);
     build_options.addOption(bool, "gguf_only", gguf_only);
+    // The corpus replay and benchmark tests run tens of seconds in Debug (#639), so
+    // `zig build test` skips them and `zig build test -Dslow-tests` runs them.
+    build_options.addOption(bool, "slow_tests", b.option(bool, "slow-tests", "Also run the slow corpus-replay and benchmark tests") orelse false);
 
     const opencode2_plugin = b.createModule(.{
         .root_source_file = b.path("lib/opencode2_plugin.zig"),

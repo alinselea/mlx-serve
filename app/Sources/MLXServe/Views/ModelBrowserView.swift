@@ -746,6 +746,8 @@ private struct MyModelsPane: View {
     @EnvironmentObject var downloads: DownloadManager
 
     @State private var freeDiskSpace: String = ""
+    @State private var sweepItems: [(model: LocalModel, check: UpdateCheck)] = []
+    @State private var showSweepAlert = false
 
     private var groups: [LocalModelGroup] {
         ModelBrowserUse.groupedBySource(appState.localModels, filter: filter)
@@ -829,7 +831,11 @@ private struct MyModelsPane: View {
                         .foregroundStyle(.secondary)
                 } else {
                     Button("Check for Updates") {
-                        Task { await downloads.checkAllForUpdates(models: appState.localModels) }
+                        Task {
+                            await downloads.checkAllForUpdates(models: appState.localModels)
+                            sweepItems = PackUpdateCheck.available(downloads.updateChecks, models: appState.localModels)
+                            showSweepAlert = true
+                        }
                     }
                     .buttonStyle(.link)
                     .font(.app(.caption))
@@ -849,6 +855,23 @@ private struct MyModelsPane: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
+            .alert(sweepItems.isEmpty ? "No Updates" : "Updates Available", isPresented: $showSweepAlert) {
+                if sweepItems.isEmpty {
+                    Button("OK", role: .cancel) {}
+                } else {
+                    Button("Update All") {
+                        for item in sweepItems {
+                            downloads.applyUpdate(item.check, for: item.model) { appState.refreshModels() }
+                        }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    Button("Cancel", role: .cancel) {}
+                }
+            } message: {
+                Text(verbatim: sweepItems.isEmpty
+                     ? PackUpdateCheck.summary(downloads.updateChecks.values.map(\.result))
+                     : PackUpdateCheck.sweepMessage(sweepItems))
+            }
         }
         .navigationTitle("My Models")
         .onAppear {
@@ -1926,12 +1949,7 @@ private struct LocalModelRow: View {
     }
 
     private func applyUpdate(_ check: UpdateCheck) {
-        downloads.startUpdate(check) {
-            appState.refreshModels()
-            guard downloads.downloads[check.repo]?.status == .completed else { return }
-            downloads.updateChecks[model.id] = nil
-            downloads.packUpdates[model.name] = nil
-        }
+        downloads.applyUpdate(check, for: model) { appState.refreshModels() }
     }
 
     private func performDelete() {
@@ -2094,7 +2112,28 @@ private struct LocalModelRow: View {
                     .font(.app(.callout))
                     .help(hasOverrides ? "Model settings (this model has its own context / KV settings)" : "Model settings")
                 }
-                if ModelRowActions.showsLock(model, unlocked: unlocked) {
+                if model.isDownloading {
+                    // The trash's slot: deleting files under a live transfer
+                    // breaks it, so the row offers the transfer's own Cancel.
+                    if let live = ModelRowActions.transfer(for: model, in: downloads.downloads) {
+                        ProgressView(value: max(0, min(1, live.state.progress)))
+                            .progressViewStyle(.linear)
+                            .frame(width: 60)
+                            .help(live.state.statusText)
+                        Text(verbatim: live.state.percentFormatted)
+                            .font(.app(.caption).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        Button { downloads.cancel(live.repoId) } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .font(.app(.callout))
+                        .help("Cancel download")
+                    } else {
+                        ProgressView().controlSize(.small)
+                    }
+                } else if ModelRowActions.showsLock(model, unlocked: unlocked) {
                     // Locked, not read-only. This slot used to hold an `Image`
                     // of an external-drive/cloud glyph nobody could read, which
                     // did nothing when clicked. It is a Button now, and clicking
@@ -2190,10 +2229,13 @@ private struct LocalModelRow: View {
             } label: { Text("Copy Model ID")
                 .font(.app(.body)) }
             Divider()
-            if ModelRowActions.showsTrash(model, unlocked: unlocked) {
+            if let live = ModelRowActions.transfer(for: model, in: downloads.downloads) {
+                Button { downloads.cancel(live.repoId) } label: { Text("Cancel Download")
+                    .font(.app(.body)) }
+            } else if ModelRowActions.showsTrash(model, unlocked: unlocked) {
                 Button(role: .destructive) { confirmDelete = true } label: { Text("Delete\u{2026}")
                     .font(.app(.body)) }
-            } else {
+            } else if !model.isDownloading {
                 // Same two-step as the lock button: the menu never deletes
                 // another app's model on one click.
                 Button { unlocked = true } label: { Text("Unlock to Delete")
