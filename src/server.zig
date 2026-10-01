@@ -8597,14 +8597,14 @@ fn handleChatCompletions(
 
     const seed: ?u64 = parseRequestSeed(root.get("seed"));
 
-    // Parse logprobs: "logprobs": true, "top_logprobs": N (0-20)
+    // Parse logprobs: "logprobs": true, "top_logprobs": N (0..MAX_TOP_LOGPROBS)
     const logprobs_n: u32 = blk: {
         const lp = root.get("logprobs") orelse break :blk 0;
         if (lp != .bool or !lp.bool) break :blk 0;
         // logprobs=true without top_logprobs defaults to 0 (just the chosen token's logprob)
         const tlp = root.get("top_logprobs") orelse break :blk 1;
         break :blk switch (tlp) {
-            .integer => |i| @intCast(@min(@max(i, 0), 20)),
+            .integer => |i| @intCast(@min(@max(i, 0), generate_mod.MAX_TOP_LOGPROBS)),
             else => 1,
         };
     };
@@ -9151,7 +9151,7 @@ fn handleCompletions(
     // silently ignored field, which reads to a client as "this model has no
     // opinion" rather than "this server never asked".
     const logprobs_n: u32 = if (root.get("logprobs")) |v| switch (v) {
-        .integer => |i| @intCast(@min(@max(i, 0), 20)),
+        .integer => |i| @intCast(@min(@max(i, 0), generate_mod.MAX_TOP_LOGPROBS)),
         else => 0,
     } else 0;
 
@@ -9774,6 +9774,14 @@ fn nonStreamingViaScheduler(
             .token => |t| try output_ids.append(allocator, t),
             .done => break :wait,
             .err => return slotFailure(slot),
+        }
+        if (conn) |c| {
+            if (c.peerClosed()) {
+                log.info("  [cancel] client disconnected while decoding (non-stream) — cancelling slot\n", .{});
+                slot.cancel();
+                client_gone = true;
+                break :wait;
+            }
         }
     }
 
@@ -11040,7 +11048,7 @@ fn handleStreamingGeneration(
             // Many templates (e.g. Qwen 3.5/3.6, some Gemma 4 variants) pre-inject
             // the opener into the prompt so the model's first tokens are already
             // INSIDE the thinking block — no opener appears in the streamed text.
-            if (!skipped_think_open and think_buf.items.len >= 7) {
+            if (!skipped_think_open and (think_buf.items.len >= 7 or chat_mod.cannotOpenThink(think_buf.items))) {
                 if (chat_mod.thinkOpenTagLenAt(think_buf.items)) |olen| {
                     // Remove the opener (<think> or the Hy3-suffixed form) and
                     // any leading newline.
@@ -16018,7 +16026,7 @@ fn handleAnthropicStreaming(
             try think_buf.appendSlice(allocator, token_text);
             think_tokens += 1;
 
-            if (!skipped_think_open and think_buf.items.len >= 7) {
+            if (!skipped_think_open and (think_buf.items.len >= 7 or chat_mod.cannotOpenThink(think_buf.items))) {
                 if (chat_mod.thinkOpenTagLenAt(think_buf.items)) |olen| {
                     var skip: usize = olen;
                     while (skip < think_buf.items.len and think_buf.items[skip] == '\n') skip += 1;
@@ -17455,7 +17463,7 @@ fn handleResponsesInner(
                 try think_buf.appendSlice(allocator, token_text);
 
                 // Skip a literal think opener if the template did not pre-inject one.
-                if (!skipped_think_open and think_buf.items.len >= 7) {
+                if (!skipped_think_open and (think_buf.items.len >= 7 or chat_mod.cannotOpenThink(think_buf.items))) {
                     if (std.mem.startsWith(u8, think_buf.items, "<think>")) {
                         var skip: usize = 7;
                         while (skip < think_buf.items.len and think_buf.items[skip] == '\n') skip += 1;

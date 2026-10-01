@@ -5349,3 +5349,55 @@ Known gap: the first request of a burst sees no company and stays DFlash until i
 - Fix: lookup rounds verify with exact acceptance whatever the installed mode
   (`acceptGraphFor` / `acceptPrefixFor`), keeping a copy with probability p. MTP drafts keep typical.
 - Guard: `a prompt-lookup draft is kept only as often as sampling would keep it under typical acceptance`.
+
+## A 1- or 2-node draft tree committed an unwritten conv row (2026-09-30)
+
+- Defect: with a DFlash tree drafter bound, a round whose tree has fewer than 3 nodes
+  (`--draft-block-size 2`, the width chooser at width 1, any off-NAX lattice of one node)
+  gave different bytes from the same request with the drafter off.
+- Cause: the tree prework kernel's grid runs one threadgroup per window row (`t < TL`) and
+  copied the conv window's three state rows from those same threadgroups (`if (t < 3)`), so
+  at TL = 1 rows 1 and 2 of the conv input were never written, and the commit read them.
+- Fix: each threadgroup copies the state rows `t, t + TL, ...` below 3, whatever TL is.
+- Guard: `gdn_decode.recurTree: every node of a draft tree equals a chain over its own
+  path` runs the 1-, 2- and 8-node prefixes of the same tree (the conv input is compared
+  whole against `[conv_state; window rows]`).
+
+## The DFlash yield gate sent a winning drafter to plain decode (2026-09-30)
+
+- Defect: 27B 4-bit with its tree drafter at block 16, a sampled prose request at temp 1.0
+  decoded at 48 tok/s, below the 86-123 tok/s the same request gets serial with MTP, while
+  the same prompt at `--draft-block-size 8` ran 108-133.
+- Cause: the runtime gate's bar (2.0 accepted/round, scaled by width) was calibrated when a
+  block-16 round cost about two serial steps; this branch's rounds cost 1.3 (28 ms against a
+  21 ms step), so a request accepting 1.9/round was still emitting tokens at 7.9 ms each
+  (`[spec-stats] table=<2k:w0:21.74,w15:7.93`) when the gate disabled it, and the sticky
+  fallback is the plain decoder, not MTP.
+- Fix: `checkDflashRuntimeGate` asks the round-cost table first (`roundBeatsSerial`): a width
+  measured cheaper per emitted token than the bucket's serial step stays on whatever its
+  acceptance. The constant still decides until both cells have samples, so the first such
+  request on a cold table still falls to plain (which is what measures the plain cell).
+- Guard: `round_cost: a round measured cheaper per token than a serial step beats it,
+  unmeasured is unknown`.
+
+## A kernel config cached by ROW COUNT handed a 16-slot tick a 16-wide verify's shape (2026-10-01)
+
+- Defect: the 27B 4-bit with its drafter served 16 concurrent streams and failed every stream
+  past that: `[concatenate] ... (16,3,10240), (1,16,10240)` in the GDN conv path, then
+  `batched decode aborted ... failing all 16 slots`. Never seen in a single-stream sweep.
+- Cause: `add_norm` keyed its Metal config on `rows = B*S`, and the config carries the output
+  SHAPE. A speculating slot's 16-token verify ran as `[1,16,D]`; the next 16-slot batched tick,
+  `[16,1,D]`, had the same row count, reused the config and got its hidden state back as
+  `[1,16,D]`. The GDN layer's fused step then declined (`qsh[0] != batch`) and the fallback
+  concatenated the merged `[16,3,C]` state with a `[1,16,C]` input. Three new things met:
+  the NAX-wide block of 16, 16 slots batching, and both on one server.
+- Fix: `CfgKey` carries `b` and `s`, the rule every `metal_kernel` config cache already states.
+- Guard: `addNorm returns each call's own [B,S,D] layout at one row count` (hermetic) and
+  `tests/test_batched_past_block_width.sh` (20 streams on a drafter-bound GDN pack).
+
+## Raw BF16 n-gram tables have no quantization groups
+
+Sushi Flash Next packs ship a raw BF16 n-gram table with `bits=16, group_size=0`;
+the group-size range check ran before the BF16 branch and failed the load with
+`NgramTableBits`. It now runs only in the quantized branch. Guard: `ngram table
+raw BF16 rows do not depend on quantization group size`.

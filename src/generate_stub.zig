@@ -18,6 +18,7 @@ pub const LogprobResult = real.LogprobResult;
 pub const GenerationResult = real.GenerationResult;
 
 pub const SchemaConstraint = real.SchemaConstraint;
+pub const MAX_TOP_LOGPROBS: u32 = 1024; // mirrors generate.zig
 pub const MtpCacheRef = union(enum) {
     qwen: @import("transformer_stub.zig").KVCache,
 
