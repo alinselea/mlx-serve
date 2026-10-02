@@ -3553,6 +3553,13 @@ pub const Generator = struct {
     /// The ONE lazy sampler for a slot's own draws: advances the seed draw index.
     pub fn sampleLazy(self: *Generator, logits: mlx.mlx_array) mlx.mlx_array {
         defer self.sampling.draw +%= 1;
+        if (self.sampling.penalized() and self.generated_ids.items.len > 0) {
+            var pen = mlx.mlx_array_new();
+            defer _ = mlx.mlx_array_free(pen);
+            if (applyRepeatPenalty(&pen, logits, self.generated_ids.items, self.sampling.repeat_penalty, self.sampling.presence_penalty, self.xfm.s)) |_| {
+                return sampleTokenLazy(pen, self.sampling, self.xfm.s);
+            } else |err| log.warn("[sampling] repeat penalty failed ({s}); this draw is unpenalized\n", .{@errorName(err)});
+        }
         return sampleTokenLazy(logits, self.sampling, self.xfm.s);
     }
 
@@ -11408,7 +11415,8 @@ pub const Generator = struct {
         // ── Phase 1: Build and submit the NEXT step FIRST ──
         // This forces the GPU to compute the pending token as a dependency,
         // so when we eval it in Phase 2, it's already ready.
-        if (self.has_pending_logits and self.logprobs_n == 0 and self.step + 1 < self.max_tokens) {
+        // A penalty stays on the slow path: here the pending token is not in `generated_ids` yet.
+        if (self.has_pending_logits and self.logprobs_n == 0 and !self.sampling.penalized() and self.step + 1 < self.max_tokens) {
             const step_logits = self.pending_logits;
             self.has_pending_logits = false;
 
@@ -21019,6 +21027,66 @@ test "constrained generation returns one logprob entry per token, paired with th
         }
     }
     try testing.expect(paired > 0);
+}
+
+test "repeat penalty shapes every sampling path, not only the logprobs one" {
+    // Bar: a penalty changes greedy output with or without logprobs, the same way, and under a grammar.
+    const path = std.c.getenv("LOGPROBS_TEST_MODEL") orelse return error.SkipZigTest;
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const a = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const dir = std.mem.span(path);
+    var config = try model_mod.parseConfig(io, a, dir);
+    defer if (config.ngram_table_path) |name| a.free(name);
+    var weights = try model_mod.loadWeights(io, a, dir);
+    defer weights.deinit();
+    model_mod.resolveWeightPrefix(&config, &weights);
+    var xfm = try Transformer.init(io, a, config, &weights);
+    defer xfm.deinit();
+    var tok = try tokenizer_mod.loadTokenizer(io, a, dir);
+    defer tok.deinit();
+    config.applyTokenizer(&tok, "<|im_end|>");
+    var token_bytes = try token_mask.build(a, &tok);
+    defer token_bytes.deinit();
+
+    const prompt = try tok.encode(a, "<|im_start|>user\nWrite the word apple 40 times separated by spaces. Answer in JSON with a words array.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
+    defer a.free(prompt);
+    const schema_src =
+        \\{"type":"object","properties":{"words":{"type":"array","items":{"type":"string"}}},"required":["words"],"additionalProperties":false}
+    ;
+    var schema = try std.json.parseFromSlice(std.json.Value, a, schema_src, .{});
+    defer schema.deinit();
+
+    const Run = struct {
+        fn ids(al: std.mem.Allocator, x: *Transformer, t: *const Tokenizer, p: []const u32, eos: []const u32, rp: f32, lp: u32, sv: ?std.json.Value, tb: *token_mask.TokenBytes) ![]u32 {
+            var sc: SchemaConstraint = undefined;
+            if (sv) |v| try sc.initFromValue(al, v, tb);
+            defer if (sv != null) sc.deinit();
+            const sampling: SamplingParams = .{ .temperature = 0, .repeat_penalty = rp, .constraint = if (sv != null) &sc.constraint else null };
+            const r = try generate(std.Io.Threaded.global_single_threaded.io(), al, x, t, p, 48, sampling, eos, 0, lp);
+            al.free(r.text);
+            if (r.logprobs) |lps| {
+                for (lps) |e| al.free(e.top_logprobs);
+                al.free(lps);
+            }
+            return r.token_ids;
+        }
+    };
+    const eos = config.eosTokenSlice();
+    const plain = try Run.ids(a, &xfm, &tok, prompt, eos, 1.0, 0, null, &token_bytes);
+    defer a.free(plain);
+    const pen = try Run.ids(a, &xfm, &tok, prompt, eos, 2.0, 0, null, &token_bytes);
+    defer a.free(pen);
+    const pen_lp = try Run.ids(a, &xfm, &tok, prompt, eos, 2.0, 1, null, &token_bytes);
+    defer a.free(pen_lp);
+    try testing.expect(!std.mem.eql(u32, plain, pen_lp));
+    try testing.expectEqualSlices(u32, pen_lp, pen);
+
+    const json_plain = try Run.ids(a, &xfm, &tok, prompt, eos, 1.0, 0, schema.value, &token_bytes);
+    defer a.free(json_plain);
+    const json_pen = try Run.ids(a, &xfm, &tok, prompt, eos, 4.0, 0, schema.value, &token_bytes);
+    defer a.free(json_pen);
+    try testing.expect(!std.mem.eql(u32, json_plain, json_pen));
 }
 
 test "keyed sampling draws the softmax distribution" {

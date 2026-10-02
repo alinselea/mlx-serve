@@ -146,6 +146,17 @@ pub const SamplingParams = struct {
     /// Absolute position of generated token 0 (the prompt length): a keyed
     /// draw's position is `position_base + draw`.
     position_base: u64 = 0,
+
+    /// Penalties read the realized history, so they keep a request off the
+    /// pipelined fast path, spec verify and batched decode.
+    pub fn penalized(self: SamplingParams) bool {
+        return self.repeat_penalty != 1.0 or self.presence_penalty != 0.0;
+    }
+
+    /// A grammar or a penalty reshapes the logits spec verify compares against.
+    pub fn shapesLogits(self: SamplingParams) bool {
+        return self.constraint != null or self.penalized();
+    }
 };
 
 pub const GenerationResult = struct {

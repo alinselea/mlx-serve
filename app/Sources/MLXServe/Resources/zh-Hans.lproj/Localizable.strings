@@ -56,6 +56,7 @@
 "%lld models" = "%lld 个模型";
 "%lld models on disk" = "%lld 个模型在磁盘上";
 "%lld of %lld selected" = "已选择 %lld / %lld";
+"%lld s" = "%lld 秒";
 "%lld session%@" = "%lld 个会话";
 "%lld source%@" = "%lld 个来源";
 "%lld steps" = "%lld 步";
@@ -390,6 +391,7 @@
 "Clear the in-memory log buffer (does not affect the running server)" = "清除内存中的日志缓冲区（不影响正在运行的服务器）";
 "Click Restart Now to apply, or Discard to revert the unsaved server-launch fields." = "点击“立即重启”以应用，或点击“放弃”以还原未保存的服务器启动项。";
 "Clip height" = "片段高度";
+"Clip length" = "片段长度";
 "Clip length. LTX only generates %lld–%lld frames on its 8N+1 ladder; the slider snaps to valid counts." = "片段长度。LTX 在其 8N+1 阶梯上只生成 %lld–%lld 帧；滑块会自动吸附到有效帧数。";
 "Clip width" = "片段宽度";
 "Clips" = "片段";
@@ -1381,8 +1383,10 @@
 "Reveal Backup" = "显示备份";
 "Reveal artifacts in Finder" = "在访达中显示产物";
 "Reveal in Finder" = "在访达中显示";
+"Rewrite image prompt" = "改写图像提示词";
 "Rewrite lyrics" = "改写歌词";
 "Rewrite style prompt" = "改写风格提示词";
+"Rewrite video prompt" = "改写视频提示词";
 "Rewrite with the chat model" = "用聊天模型重写";
 "Rock anthem" = "摇滚金曲";
 "Roll a new seed" = "随机生成新种子";
@@ -1466,7 +1470,6 @@
 "Selecting this agent loads its model; “Current” leaves whatever is running alone." = "选择此 Agent 会加载它的模型；“当前”则保持正在运行的模型不变。";
 "Send Anyway" = "仍然发送";
 "Send reasoning-enabled requests for models that support it. The bot replies with the final answer only (no thinking trace)." = "对支持的模型发送启用推理的请求。机器人只回复最终答案（不含思考过程）。";
-"Send to Chat — opens a new conversation with this attached" = "发送到聊天 —— 新建一个附带此内容的会话";
 "Sends these numbers plus the server settings, your chip, GPU cores, memory and macOS version. No account, nothing identifying." = "会发送这些数据以及服务器设置、芯片、GPU 核心数、内存和 macOS 版本。无需账号，不含任何身份信息。";
 "Server" = "服务器";
 "Server Log" = "服务器日志";
@@ -1505,7 +1508,7 @@
 "Show earlier messages" = "显示更早的消息";
 "Show in Finder" = "在访达中显示";
 "Show less" = "收起";
-"Show live preview while generating" = "生成时显示实时预览";
+"Show live preview while generating (~1% slower)" = "生成时显示实时预览（约慢 1%）";
 "Show log" = "显示日志";
 "Show more" = "展开";
 "Show this quant in Finder" = "在 Finder 中显示此量化版本";

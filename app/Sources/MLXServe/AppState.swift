@@ -490,21 +490,6 @@ class AppState: ObservableObject {
         chatWorkspace = .create(experiment)
     }
 
-    /// "Send to Chat" on a Create-pane result: open a NEW conversation holding
-    /// it, and switch to Chats so the user SEES where it went.
-    @discardableResult
-    func sendGeneratedMediaToNewChat(path: String, prompt: String,
-                                     kind: ChatMediaRef.Kind) -> UUID {
-        let sessionId = newChatSession(agentId: defaultAgentId)
-        if let idx = chatSessions.firstIndex(where: { $0.id == sessionId }) {
-            chatSessions[idx].messages.append(
-                GeneratedMediaHandoff.message(path: path, prompt: prompt, kind: kind))
-            saveChatHistory()
-        }
-        showConversation()
-        return sessionId
-    }
-
     /// Back to the transcript. Selecting a conversation does this too — the
     /// sidebar's mode switcher is the visible version of it.
     func showConversation() {

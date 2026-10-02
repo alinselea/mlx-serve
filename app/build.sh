@@ -65,13 +65,18 @@ if [ -n "${MLX_GGUF_DIR:-}" ]; then
     echo "→ mlx-serve-gguf from $MLX_GGUF_DIR (not the lib/ pin)"
 fi
 
-# Signing identity from env (set in ~/.zshrc or CI). Unset = ad-hoc ("-"), so
-# anyone can build without an Apple Developer account; a release sets the real
-# identity (release.yml does).
+# Signing identity from env (set in ~/.zshrc or CI). Unset, or not in this Mac's
+# keychain, = ad-hoc ("-"), so anyone can build without an Apple Developer account;
+# a release sets the real identity (release.yml does).
 IDENTITY="${APPLE_DEVELOPER_ID:--}"
 TEAM_ID="${APPLE_TEAM_ID:--}"
+if [ "$IDENTITY" != "-" ] && ! security find-identity -v -p codesigning 2>/dev/null | grep -qF -- "$IDENTITY"; then
+    echo "→ '$IDENTITY' is not in this Mac's keychain"
+    IDENTITY="-"
+    TEAM_ID="-"
+fi
 if [ "$IDENTITY" = "-" ]; then
-    echo "→ APPLE_DEVELOPER_ID not set — building with ad-hoc signing (dev build, not distributable)"
+    echo "→ Building with ad-hoc signing (dev build, not distributable)"
 fi
 
 cd "$SCRIPT_DIR"
@@ -459,7 +464,8 @@ if [ "$FAST_DEV" = "1" ] \
    && [ -f "$CONTENTS/Frameworks/libmlxc.dylib" ] \
    && [ -f "$CONTENTS/Frameworks/mlx.metallib" ] \
    && [ ! "$MLX_STAGE_LIB/libmlxc.dylib" -nt "$CONTENTS/Frameworks/libmlxc.dylib" ] \
-   && [ ! "$PROJECT_ROOT/lib/llama/lib/libllama.dylib" -nt "$CONTENTS/Frameworks/libllama.dylib" ]; then
+   && [ ! "$PROJECT_ROOT/lib/llama/lib/libllama.dylib" -nt "$CONTENTS/Frameworks/libllama.dylib" ] \
+   && codesign --verify "$CONTENTS/Frameworks/"*.dylib 2>/dev/null; then
     STAGE_FRAMEWORKS=0
     echo "→ Reusing bundled frameworks (FAST_DEV)"
 fi

@@ -5,6 +5,9 @@ Full histories: live failures, measurements, diagnosis ladders, dead ends. The d
 ### `top_p: 0` masked every token and sampled uniform garbage (2026-09-16)
 The nucleus keeps a rank while the mass STRICTLY above it is `< top_p`. Rank 0 sees exactly 0, so a literal `top_p: 0` (what clients send for "greedy") kept nothing: the row went `-inf` everywhere and the categorical draw was uniform over 248k ids ("będziemyWATCH끈 გა stimulation"). 0.001 and up were fine, which is why no sweep ever saw it. Fix: the threshold floors at `floatMin(f32)`, so rank 0 is always inside and `top_p 0` is greedy like `top_k 1`. Guard: `applyTopP at top_p 0 keeps exactly the argmax` (generate.zig) + `tests/test_api_edges.sh` (top_p 0 == temperature 0 live).
 
+### A penalty applied only on the logprobs path was silently ignored everywhere else (#564)
+`repeat_penalty` / `frequency_penalty` / `presence_penalty` reached `applyRepeatPenalty` only through `sampleToken`, which the decode loop calls only when logprobs are requested. The pipelined fast path, the grammar path, spec verify (PLD/MTP/DFlash) and batched decode all sampled raw logits: "apple ×40" gave 120 apples at `repeat_penalty 2.0` and 3 with `logprobs: true`, and `json_schema` replies were byte-identical at any penalty. Fix: `Generator.sampleLazy` penalizes over the realized `generated_ids`; `SamplingParams.penalized()` keeps a request off `next`'s fast path (its pending token is not realized yet), off spec (`requestSpecModes` `shaped_logits`) and off batched decode (`BatchVerdict.penalty`). Guard: `repeat penalty shapes every sampling path` (generate.zig, `LOGPROBS_TEST_MODEL`) + `tests/test_repeat_penalty.sh` (engagement counts for PLD and batching).
+
 ### Every sampled token ranked the whole vocabulary; a shortlist is exact only if it ranks the way the row does
 `applyTopP` argsorted 248,320 logits per sampled token and `applyTopK` paid a second pass through `mlx_argpartition`. On Metal `Partition::eval_gpu` and `ArgPartition::eval_gpu` "direct partition to sort for now", so `mlx_topk` and `mlx_argpartition` ARE the multi-block merge sort and buy nothing. Qwen3.8-Flash-Next on M4 Max, MTP off: 65.0 tok/s greedy vs 60.5 at temperature 1 / top_p 0.95 / top_k 20.
 
@@ -5401,3 +5404,15 @@ Sushi Flash Next packs ship a raw BF16 n-gram table with `bits=16, group_size=0`
 the group-size range check ran before the BF16 branch and failed the load with
 `NgramTableBits`. It now runs only in the quantized branch. Guard: `ngram table
 raw BF16 rows do not depend on quantization group size`.
+
+## An image in any stream dropped the whole batched group to the dense mask
+
+- Defect: Flash-Next behind an agent that attaches screenshots lost most of its aggregate decode speed at three or more
+  streams; the same transcripts without the images did not.
+- Cause: an M-RoPE slot (`mrope_pos`) made the batched decode setup refuse the QSA gather arm for the WHOLE group
+  (`any_mrope`), so every plain tick ran the dense mask over the full KV. One or two MTP slots verify per row and never
+  reach it; the MTP crowd path folds three or more into one plain batched tick, which does.
+- Fix: the batched gather arm serves M-RoPE slots. It reads no rope tables: queries are rotated before it and each
+  slot's cached keys already carry their positions. The `any_mrope` refusals (`qsaBatchedGatherOn`, the block-keeping
+  branch of `qsaMask`, the gather's early return) and the raw pad-waste bill for such slots are gone.
+- Guard: `qsaBatchedAttn: an M-RoPE slot takes the gather arm, byte-identical to the same slot without positions`.
